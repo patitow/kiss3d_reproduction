@@ -1,0 +1,179 @@
+# Mesh3D Generator - Geração de Malhas 3D a partir de Imagens
+
+Projeto de Visão Computacional para gerar malhas 3D a partir de uma ou mais imagens, utilizando LLM multimodal para gerar descrições extremamente detalhadas da cena que guiam o refinamento da malha.
+
+## 📋 Objetivo
+
+Gerar uma malha 3D a partir de uma ou mais imagens, onde primeiro um texto descritivo da cena será gerado utilizando LLM para gerar o texto extremamente detalhado. O normal map e outras informações serão usadas de forma que a malha seja refinada de acordo com o texto e com essas técnicas.
+
+## 🎯 Pipeline do Projeto
+
+O projeto segue o seguinte pipeline:
+
+1. **Geração de Texto Detalhado com LLM**: Análise da(s) imagem(ns) usando LLM multimodal (llava/bakllava) para gerar descrição extremamente detalhada da cena
+2. **Geração de Normal Maps**: Extração de normal maps a partir da imagem de entrada
+3. **Inicialização da Malha**: Criação da malha inicial usando LRM ou Sphere init (InstantMesh)
+4. **Refinamento da Malha**: Melhoria da malha usando ControlNet-Tile e ControlNet-Normal + texto descritivo detalhado gerado pelo LLM
+
+## 🚀 Instalação
+
+### Pré-requisitos
+
+- Python 3.11 (recomendado)
+- Poetry (gerenciador de dependências)
+
+### Setup
+
+```bash
+# Instalar Poetry (se ainda não tiver)
+curl -sSL https://install.python-poetry.org | python3 -
+
+# Clonar o repositório
+git clone <seu-repositorio>
+cd mesh3d-generator
+
+# Instalar dependências
+poetry install
+
+# Ativar o ambiente virtual
+poetry shell
+```
+
+## 📁 Estrutura do Projeto
+
+```
+mesh3d-generator/
+├── mesh3d_generator/
+│   ├── __init__.py
+│   ├── llm/                    # Etapa 0: Geração de texto a partir de imagens
+│   │   ├── __init__.py
+│   │   └── text_generator.py
+│   ├── normal_maps/            # Etapa 1: Geração de normal maps
+│   │   ├── __init__.py
+│   │   └── generator.py
+│   ├── mesh_initialization/    # Etapa 2: Inicialização da malha
+│   │   ├── __init__.py
+│   │   ├── lrm.py
+│   │   └── instant_mesh.py
+│   ├── mesh_refinement/        # Etapa 3: Refinamento da malha
+│   │   ├── __init__.py
+│   │   └── refiner.py
+│   ├── utils/
+│   │   ├── __init__.py
+│   │   ├── data_loader.py
+│   │   └── visualization.py
+│   └── config/
+│       └── config.yaml
+├── data/
+│   ├── raw/                   # Imagens de entrada
+│   ├── processed/
+│   └── outputs/               # Malhas 3D geradas
+├── notebooks/
+│   └── experiments.ipynb
+├── tests/
+│   └── test_basic.py
+├── scripts/
+│   ├── download_dataset.py
+│   ├── run_pipeline.py
+│   └── test_ollama.py
+├── pyproject.toml
+├── README.md
+├── PLANNING.md
+└── .gitignore
+```
+
+## 📅 Schedule e Timeline
+
+Consulte o arquivo [PLANNING.md](PLANNING.md) para o planejamento detalhado e cronograma completo.
+
+### Resumo do Cronograma
+
+- **Semana 1-2**: Setup do ambiente e estudo do Kiss3DGen
+- **Semana 3-4**: Implementação da geração de texto detalhado com LLM multimodal a partir de imagens
+- **Semana 5-6**: Implementação da geração de Normal Maps
+- **Semana 7-8**: Implementação da inicialização de malha (LRM/InstantMesh)
+- **Semana 9-10**: Implementação do refinamento de malha
+- **Semana 11-12**: Integração completa do pipeline (texto + normal maps + refinamento)
+- **Semana 13-14**: Testes e validação com dataset do Google Research
+- **Semana 15-16**: Refinamentos finais e documentação
+
+## 🔧 Uso Básico
+
+```python
+from mesh3d_generator import TextGenerator, NormalMapGenerator, MeshRefiner
+from mesh3d_generator.mesh_initialization import InstantMeshInitializer
+from PIL import Image
+
+# 1. Gerar texto detalhado a partir da imagem
+text_generator = TextGenerator()
+image = Image.open("data/raw/chair.jpg")
+detailed_text = text_generator.generate_from_image(image)
+
+# 2. Gerar normal map
+normal_generator = NormalMapGenerator()
+normal_map = normal_generator.generate(image)
+
+# 3. Inicializar malha
+mesh_initializer = InstantMeshInitializer()
+mesh = mesh_initializer.initialize(image, normal_map)
+
+# 4. Refinar malha com texto e normal map
+mesh_refiner = MeshRefiner()
+refined_mesh = mesh_refiner.refine(mesh, detailed_text, normal_map)
+
+# 5. Salvar a malha
+refined_mesh.export("outputs/chair.obj")
+```
+
+## 🤖 Integração com Ollama
+
+O projeto usa **Ollama** para modelos LLM locais, incluindo modelos multimodais para análise de imagens e geração de descrições detalhadas.
+
+### Setup Rápido
+```bash
+# Instalar Ollama (se ainda não tiver)
+# Windows: https://ollama.com/download
+# Linux/Mac: curl -fsSL https://ollama.com/install.sh | sh
+
+# Instalar modelos
+ollama pull llama3.2  # Modelo textual (opcional, para melhorias de texto)
+ollama pull llava     # Modelo multimodal (ESSENCIAL - para análise de imagens)
+
+# Testar integração
+poetry run python scripts/test_ollama.py
+```
+
+### Uso do LLM Multimodal
+
+```python
+from mesh3d_generator import TextGenerator
+from PIL import Image
+
+# Inicializar gerador com modelo multimodal
+text_generator = TextGenerator(
+    model_name="llama3.2",      # Para processamento de texto
+    multimodal_model="llava"    # Para análise de imagens
+)
+
+# Gerar descrição detalhada a partir de imagem
+image = Image.open("data/raw/scene.jpg")
+detailed_description = text_generator.generate_from_image(image)
+print(detailed_description)
+```
+
+## 📚 Recursos
+
+- **Dataset**: [Google Research Dataset](https://app.gazebosim.org/GoogleResearch)
+- **Codebase Base**: [Kiss3DGen](https://github.com/EnVision-Research/Kiss3DGen)
+- **Conferência**: [CVPR 2025](https://openaccess.thecvf.com/CVPR2025)
+- **Ollama**: [Documentação](https://github.com/ollama/ollama)
+
+## 🤝 Contribuição
+
+Este é um projeto acadêmico. Para contribuições, por favor abra uma issue ou pull request.
+
+## 📝 Licença
+
+Este projeto é para fins acadêmicos.
+
+

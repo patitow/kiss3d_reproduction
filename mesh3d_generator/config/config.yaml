@@ -1,0 +1,54 @@
+# Configurações do projeto Mesh3D Generator
+
+# Modelos
+models:
+  text_to_image:
+    name: "runwayml/stable-diffusion-v1-5"
+    num_inference_steps: 50
+    guidance_scale: 7.5
+  
+  normal_map:
+    name: "DPT_Large"
+    model_type: "dpt"
+  
+  mesh_initialization:
+    method: "instant_mesh"  # ou "lrm"
+    lrm_model_path: null
+    instant_mesh_model_path: null
+  
+  mesh_refinement:
+    controlnet_tile: "lllyasviel/control_v11f1e_sd15_tile"
+    controlnet_normal: "lllyasviel/control_v11p_sd15_normalbae"
+    num_iterations: 3
+  
+  llm:
+    provider: "ollama"  # ollama ou openai
+    model_name: "llama3.2"  # Modelo textual (llama3.2, mistral, etc.)
+    multimodal_model: "llava"  # Modelo multimodal (llava, bakllava, etc.)
+    ollama_url: "http://localhost:11434"
+    temperature: 0.7
+    max_tokens: 1000
+
+# Dataset
+dataset:
+  path: "data/raw"
+  google_research_url: "https://app.gazebosim.org/GoogleResearch"
+
+# Paths
+paths:
+  output_dir: "data/outputs"
+  checkpoints_dir: "checkpoints"
+  logs_dir: "logs"
+
+# Hardware
+hardware:
+  device: "cuda"  # ou "cpu"
+  batch_size: 1
+  num_workers: 4
+
+# Logging
+logging:
+  level: "INFO"
+  log_file: "logs/mesh3d_generator.log"
+
+
