@@ -53,3 +53,4 @@ class ComfyUIMeshGenerator:
         print(f"  [AVISO] Reconstrucao 3D via {self.method} ainda nao implementada completamente")
         return None
 
+

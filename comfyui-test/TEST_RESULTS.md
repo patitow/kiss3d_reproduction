@@ -115,3 +115,4 @@ Todos os componentes necessários estão prontos:
 **Desenvolvido por:** Auto (Cursor AI Assistant)  
 **Projeto:** Mesh3D Generator - Visão Computacional 2025.2
 
+

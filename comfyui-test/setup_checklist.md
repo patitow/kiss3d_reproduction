@@ -130,3 +130,4 @@ Quando todos os itens acima estiverem marcados, você está pronto para fazer o 
 2. Execute `test_workflow_simple.py` para testar workflow básico
 3. Execute `integrate_llm.py` para testar pipeline completo
 
+

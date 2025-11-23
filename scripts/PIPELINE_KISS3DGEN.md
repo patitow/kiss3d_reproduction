@@ -109,3 +109,4 @@ recon_mesh_path = k3d_wrapper.reconstruct_3d_bundle_image(
 3. **Médio prazo**: Integrar geração de 3D bundle image via ComfyUI
 4. **Longo prazo**: Implementar reconstrução 3D completa
 
+

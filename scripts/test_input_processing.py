@@ -118,12 +118,19 @@ def test_mesh_loading(model_name: str, dataset_path: Path):
         else:
             print(f"[AVISO] Mesh tem volume zero ou negativo")
         
-        # Salvar mesh processado para inspeção
+        # Salvar mesh processado para inspeção (com texturas preservadas)
         output_dir = Path("data/outputs/test_input_processing") / model_name
         output_dir.mkdir(parents=True, exist_ok=True)
         
-        mesh.export(str(output_dir / "mesh_processed.obj"))
-        print(f"[OK] Mesh processado salvo em: {output_dir / 'mesh_processed.obj'}")
+        # Usar função de exportação que preserva texturas
+        from scripts.run_3d_pipeline import export_mesh_with_textures
+        exported_path = export_mesh_with_textures(
+            mesh, 
+            output_dir,
+            original_mesh_path=mesh_path,
+            mesh_name="mesh_processed"
+        )
+        print(f"[OK] Mesh processado salvo em: {exported_path}")
         
         return True
     except Exception as e:

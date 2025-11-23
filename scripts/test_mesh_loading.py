@@ -46,3 +46,4 @@ if model_path.exists():
                 print(f"MTL size: {len(mtl_content)} bytes")
                 print(f"MTL lines: {len(mtl_content.splitlines())}")
 
+

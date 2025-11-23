@@ -185,3 +185,4 @@ Depois do test run bem-sucedido:
 - [ControlNet Models](https://huggingface.co/lllyasviel/ControlNet-v1-1)
 - [Ollama Docs](https://github.com/ollama/ollama)
 
+

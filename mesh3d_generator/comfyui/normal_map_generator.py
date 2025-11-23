@@ -88,3 +88,4 @@ class ComfyUINormalMapGenerator:
             traceback.print_exc()
             return None
 
+

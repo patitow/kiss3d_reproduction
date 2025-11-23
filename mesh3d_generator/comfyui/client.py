@@ -185,3 +185,4 @@ class ComfyUIClient:
                 node['widgets_values'][0] = text
         return workflow
 
+

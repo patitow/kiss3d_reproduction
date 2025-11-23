@@ -57,3 +57,4 @@ if isinstance(mesh, trimesh.Trimesh):
         if hasattr(mesh.visual, 'material'):
             print(f"Material: {mesh.visual.material}")
 
+

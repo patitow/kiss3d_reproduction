@@ -99,3 +99,4 @@ class ComfyUIBundleImageGenerator:
         
         return bundle_image, save_path
 
+

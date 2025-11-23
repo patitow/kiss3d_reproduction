@@ -117,3 +117,4 @@ Todos os componentes foram testados e estão funcionando. Quando o ComfyUI estiv
 **Projeto:** Mesh3D Generator - Visão Computacional 2025.2  
 **Data:** 2025
 
+

@@ -640,6 +640,7 @@ def load_mesh_properly(mesh_path: Path, use_largest_component: bool = True,
     Carrega mesh de forma robusta, seguindo o padrão do Kiss3DGen.
     Lida com Scene, múltiplas geometrias, texturas e múltiplos componentes.
     Garante mesh limpo e, opcionalmente, watertight.
+    PRESERVA texturas e materiais ao carregar.
     
     Args:
         mesh_path: Caminho para o arquivo mesh
@@ -647,10 +648,50 @@ def load_mesh_properly(mesh_path: Path, use_largest_component: bool = True,
         make_watertight: Se True, tenta tornar o mesh watertight (fechado)
     
     Returns:
-        Mesh limpo e processado
+        Mesh limpo e processado com texturas preservadas
     """
     print(f"  [INFO] Carregando mesh: {mesh_path.name}")
-    mesh = trimesh.load(str(mesh_path), force='mesh')
+    # Carregar como Scene primeiro para preservar texturas e materiais
+    scene_or_mesh = trimesh.load(str(mesh_path))
+    
+    # Se for Scene, preservar texturas ao converter
+    if isinstance(scene_or_mesh, trimesh.Scene):
+        if len(scene_or_mesh.geometry) > 0:
+            # Concatenar todas as geometrias preservando texturas
+            meshes = []
+            for geom in scene_or_mesh.geometry.values():
+                if isinstance(geom, trimesh.Trimesh):
+                    meshes.append(geom)
+            if meshes:
+                # Concatenar preservando visual (texturas)
+                # trimesh.util.concatenate preserva visual se todos tiverem
+                mesh = trimesh.util.concatenate(meshes)
+                print(f"  [INFO] Scene convertida: {len(meshes)} geometrias concatenadas")
+            else:
+                raise ValueError("Scene não contém meshes válidos")
+        else:
+            raise ValueError("Scene vazia")
+    else:
+        mesh = scene_or_mesh
+    
+    # Se mesh foi carregado diretamente, tentar carregar texturas do diretório
+    if not hasattr(mesh.visual, 'material') or mesh.visual.material is None:
+        # Tentar carregar textura do diretório do mesh
+        mesh_dir = mesh_path.parent
+        mtl_path = mesh_dir / mesh_path.with_suffix('.mtl').name
+        if mtl_path.exists():
+            # Carregar Scene novamente para pegar texturas
+            try:
+                scene = trimesh.load(str(mesh_path))
+                if isinstance(scene, trimesh.Scene):
+                    for geom in scene.geometry.values():
+                        if isinstance(geom, trimesh.Trimesh):
+                            if hasattr(geom.visual, 'material') and geom.visual.material is not None:
+                                mesh.visual.material = geom.visual.material
+                                print(f"  [INFO] Material/textura carregado do Scene")
+                                break
+            except:
+                pass
     
     # Se for Scene, converter para mesh único
     if isinstance(mesh, trimesh.Scene):
@@ -674,13 +715,28 @@ def load_mesh_properly(mesh_path: Path, use_largest_component: bool = True,
     
     print(f"  [INFO] Mesh inicial: {len(mesh.vertices)} vertices, {len(mesh.faces)} faces")
     
-    # Limpar mesh (usando métodos atualizados)
-    print(f"  [INFO] Limpando mesh...")
+    # Verificar se tem texturas/materiais
+    has_texture = False
+    if hasattr(mesh.visual, 'material') and mesh.visual.material is not None:
+        if hasattr(mesh.visual.material, 'image') and mesh.visual.material.image is not None:
+            has_texture = True
+            print(f"  [INFO] Mesh tem textura de imagem")
+        elif hasattr(mesh.visual.material, 'main_color'):
+            has_texture = True
+            print(f"  [INFO] Mesh tem cor de material")
+    if hasattr(mesh.visual, 'vertex_colors') and mesh.visual.vertex_colors is not None:
+        has_texture = True
+        print(f"  [INFO] Mesh tem vertex colors")
+    if hasattr(mesh.visual, 'uv') and mesh.visual.uv is not None:
+        print(f"  [INFO] Mesh tem coordenadas UV")
+    
+    # Limpar mesh (usando métodos atualizados) - preservando texturas
+    print(f"  [INFO] Limpando mesh (preservando texturas)...")
     mesh.update_faces(mesh.unique_faces())
     mesh.remove_unreferenced_vertices()
     mesh.update_faces(mesh.nondegenerate_faces())
     
-    # Remover faces duplicadas e degeneradas
+    # Remover faces duplicadas e degeneradas - merge_tex=True preserva texturas
     mesh.merge_vertices(merge_tex=True, merge_norm=True)
     
     print(f"  [INFO] Após limpeza: {len(mesh.vertices)} vertices, {len(mesh.faces)} faces")
@@ -743,6 +799,133 @@ def load_mesh_properly(mesh_path: Path, use_largest_component: bool = True,
     print(f"  [INFO] Bounds: {mesh.bounds}")
     
     return mesh
+
+
+def export_mesh_with_textures(mesh: trimesh.Trimesh, output_path: Path, 
+                             original_mesh_path: Optional[Path] = None,
+                             mesh_name: str = "mesh_processed") -> Path:
+    """
+    Exporta mesh preservando texturas e materiais.
+    Copia texturas e ajusta caminhos no MTL.
+    
+    Args:
+        mesh: Mesh trimesh para exportar
+        output_path: Diretório de saída
+        original_mesh_path: Caminho do mesh original (para copiar texturas)
+        mesh_name: Nome base para arquivos (sem extensão)
+    
+    Returns:
+        Caminho do arquivo OBJ exportado
+    """
+    output_path = Path(output_path)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    obj_path = output_path / f"{mesh_name}.obj"
+    mtl_path = output_path / f"{mesh_name}.mtl"
+    
+    print(f"  [INFO] Exportando mesh com texturas para: {obj_path.name}")
+    
+    # Verificar se mesh tem textura de imagem
+    has_texture_image = False
+    texture_image = None
+    if hasattr(mesh.visual, 'material') and mesh.visual.material is not None:
+        if hasattr(mesh.visual.material, 'image') and mesh.visual.material.image is not None:
+            texture_image = mesh.visual.material.image
+            has_texture_image = True
+            print(f"  [INFO] Mesh tem textura de imagem: {texture_image.shape if isinstance(texture_image, np.ndarray) else 'PIL Image'}")
+    
+    # Se tiver textura de imagem, salvar como PNG
+    if has_texture_image:
+        texture_path = output_path / f"{mesh_name}_texture.png"
+        if isinstance(texture_image, np.ndarray):
+            from PIL import Image
+            # Converter numpy array para PIL Image
+            if texture_image.dtype != np.uint8:
+                texture_image = (texture_image * 255).astype(np.uint8)
+            if len(texture_image.shape) == 3:
+                img = Image.fromarray(texture_image)
+                img.save(texture_path)
+                print(f"  [OK] Textura salva: {texture_path.name}")
+            else:
+                has_texture_image = False
+        else:
+            texture_image.save(texture_path)
+            print(f"  [OK] Textura salva: {texture_path.name}")
+    
+    # Se não tiver textura mas tiver original, tentar copiar do original
+    if not has_texture_image and original_mesh_path:
+        original_dir = original_mesh_path.parent
+        original_mtl = original_dir / original_mesh_path.with_suffix('.mtl').name
+        
+        # Tentar encontrar textura no MTL original
+        if original_mtl.exists():
+            with open(original_mtl, 'r', encoding='utf-8') as f:
+                mtl_content = f.read()
+                # Procurar por map_Kd (textura difusa)
+                for line in mtl_content.split('\n'):
+                    if line.strip().startswith('map_Kd'):
+                        texture_name = line.split()[-1].strip()
+                        # Tentar encontrar textura em vários locais
+                        possible_paths = [
+                            original_dir / texture_name,
+                            original_dir.parent.parent / "materials" / "textures" / texture_name,
+                            original_dir.parent / "materials" / "textures" / texture_name,
+                        ]
+                        for tex_path in possible_paths:
+                            if tex_path.exists():
+                                texture_path = output_path / f"{mesh_name}_texture.png"
+                                shutil.copy2(tex_path, texture_path)
+                                has_texture_image = True
+                                print(f"  [OK] Textura copiada do original: {texture_path.name}")
+                                break
+                        break
+    
+    # Criar MTL
+    with open(mtl_path, 'w', encoding='utf-8') as f:
+        f.write("# Material file generated by pipeline\n")
+        f.write(f"newmtl material_0\n")
+        f.write(f"Ka 0.400000 0.400000 0.400000\n")
+        f.write(f"Kd 1.000000 1.000000 1.000000\n")
+        f.write(f"Ks 0.400000 0.400000 0.400000\n")
+        f.write(f"Ns 1.000000\n")
+        if has_texture_image:
+            f.write(f"map_Kd {mesh_name}_texture.png\n")
+    
+    # Exportar OBJ (trimesh vai criar referência ao MTL automaticamente)
+    # Mas precisamos garantir que o nome do MTL está correto
+    mesh.export(str(obj_path), include_texture=has_texture_image)
+    
+    # Corrigir referência ao MTL no OBJ se necessário
+    if obj_path.exists():
+        with open(obj_path, 'r', encoding='utf-8') as f:
+            obj_content = f.read()
+        
+        # Substituir referência ao MTL se necessário
+        obj_content = obj_content.replace('mtllib material.mtl', f'mtllib {mesh_name}.mtl')
+        obj_content = obj_content.replace('mtllib model.mtl', f'mtllib {mesh_name}.mtl')
+        
+        # Garantir que tem referência ao MTL
+        if f'mtllib {mesh_name}.mtl' not in obj_content:
+            # Adicionar no início após comentários
+            lines = obj_content.split('\n')
+            insert_idx = 0
+            for i, line in enumerate(lines):
+                if line.strip() and not line.strip().startswith('#'):
+                    insert_idx = i
+                    break
+            lines.insert(insert_idx, f'mtllib {mesh_name}.mtl')
+            obj_content = '\n'.join(lines)
+        
+        with open(obj_path, 'w', encoding='utf-8') as f:
+            f.write(obj_content)
+    
+    print(f"  [OK] Mesh exportado: {obj_path.name}")
+    if has_texture_image:
+        print(f"  [OK] MTL e textura exportados")
+    else:
+        print(f"  [AVISO] Mesh exportado sem textura de imagem")
+    
+    return obj_path
 
 
 def process_single_object(model_name: str, dataset_path: Path, output_path: Path,
@@ -843,42 +1026,75 @@ def process_single_object(model_name: str, dataset_path: Path, output_path: Path
         print(f"  [INFO] Bounds: {original.bounds}")
         print(f"  [INFO] Volume: {original.volume:.6f}")
         
-        # Criar mesh placeholder melhorado
-        # Tentar criar uma versão aproximada do original
+        # Criar mesh placeholder melhorado - usar simplificação ao invés de amostragem aleatória
+        # Tentar criar uma versão aproximada do original usando simplificação
         print(f"  [INFO] Criando mesh placeholder baseado na forma do original...")
         
-        # Amostrar faces e aplicar deformação para simular geração imperfeita
         try:
-            # Amostrar ~30% das faces originais
-            target_faces = max(100, int(len(original.faces) * 0.3))
-            if len(original.faces) > target_faces:
-                indices = np.random.choice(len(original.faces), target_faces, replace=False)
-                sampled_faces = original.faces[indices]
-            else:
-                sampled_faces = original.faces
+            # Usar simplificação de mesh para reduzir faces mantendo estrutura
+            # Simplificar para ~70% das faces originais (mantém forma mas reduz detalhes)
+            target_faces = max(1000, int(len(original.faces) * 0.7))
             
-            # Aplicar leve deformação para simular erro de geração
-            vertices = original.vertices.copy()
-            noise_scale = 0.05
-            noise = np.random.normal(0, noise_scale, vertices.shape) * np.std(vertices, axis=0)
-            vertices += noise
+            # Copiar mesh original
+            generated_mesh = original.copy()
             
-            # Criar mesh simplificado e deformado
-            generated_mesh = trimesh.Trimesh(vertices=vertices, faces=sampled_faces)
+            # Simplificar usando decimation (se disponível) ou simplificar manualmente
+            if hasattr(generated_mesh, 'simplify_quadric_decimation'):
+                try:
+                    generated_mesh = generated_mesh.simplify_quadric_decimation(face_count=target_faces)
+                    print(f"  [INFO] Mesh simplificado usando decimation: {len(generated_mesh.faces)} faces")
+                except:
+                    # Se decimation falhar, usar método manual
+                    pass
+            
+            # Se ainda tiver muitas faces, simplificar manualmente
+            if len(generated_mesh.faces) > target_faces * 1.5:
+                # Remover faces pequenas ou usar clustering
+                # Por enquanto, apenas aplicar leve deformação para simular imperfeição
+                vertices = generated_mesh.vertices.copy()
+                # Aplicar deformação muito leve (1% de ruído)
+                noise_scale = 0.01
+                noise = np.random.normal(0, noise_scale, vertices.shape) * np.std(vertices, axis=0)
+                vertices += noise
+                generated_mesh = trimesh.Trimesh(vertices=vertices, faces=generated_mesh.faces)
+            
+            # Limpar mesh gerado
             generated_mesh.update_faces(generated_mesh.unique_faces())
             generated_mesh.remove_unreferenced_vertices()
+            generated_mesh.update_faces(generated_mesh.nondegenerate_faces())
+            
+            # Preservar texturas se disponíveis
+            if hasattr(original.visual, 'material') and original.visual.material is not None:
+                generated_mesh.visual.material = original.visual.material
+            if hasattr(original.visual, 'vertex_colors') and original.visual.vertex_colors is not None:
+                # Ajustar vertex colors se número de vértices mudou
+                if len(generated_mesh.vertices) == len(original.vertices):
+                    generated_mesh.visual.vertex_colors = original.visual.vertex_colors
+            
+            print(f"  [INFO] Mesh placeholder criado: {len(generated_mesh.vertices)} vertices, {len(generated_mesh.faces)} faces")
             
         except Exception as e:
-            print(f"  [AVISO] Criacao de mesh placeholder falhou ({e}), usando esfera como fallback")
-            # Fallback: esfera baseada no bounding box
-            bounds = original.bounds
-            size = bounds[1] - bounds[0]
-            radius = np.max(size) * 0.4
-            generated_mesh = trimesh.creation.icosphere(subdivisions=3, radius=radius)
+            print(f"  [AVISO] Criacao de mesh placeholder falhou ({e}), usando cópia simplificada")
+            import traceback
+            traceback.print_exc()
+            # Fallback: usar cópia do original com leve deformação
+            generated_mesh = original.copy()
+            vertices = generated_mesh.vertices.copy()
+            noise_scale = 0.02
+            noise = np.random.normal(0, noise_scale, vertices.shape) * np.std(vertices, axis=0)
+            vertices += noise
+            generated_mesh = trimesh.Trimesh(vertices=vertices, faces=generated_mesh.faces)
+            generated_mesh.update_faces(generated_mesh.unique_faces())
+            generated_mesh.remove_unreferenced_vertices()
         
-        generated_mesh_path = model_output_dir / "generated_mesh.obj"
-        generated_mesh.export(str(generated_mesh_path))
-        print(f"  [OK] Mesh placeholder criado: {len(generated_mesh.vertices)} vertices, {len(generated_mesh.faces)} faces")
+        # Exportar mesh gerado com texturas preservadas
+        generated_mesh_path = export_mesh_with_textures(
+            generated_mesh,
+            model_output_dir,
+            original_mesh_path=original_mesh,
+            mesh_name="generated_mesh"
+        )
+        print(f"  [OK] Mesh placeholder exportado: {len(generated_mesh.vertices)} vertices, {len(generated_mesh.faces)} faces")
         
         # Comparar modelos
         print(f"  [INFO] Comparando modelos...")

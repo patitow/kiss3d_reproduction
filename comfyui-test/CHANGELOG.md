@@ -65,3 +65,4 @@ comfyui-test/
 - Workflows validados (estrutura JSON)
 - Scripts prontos para uso
 
+
