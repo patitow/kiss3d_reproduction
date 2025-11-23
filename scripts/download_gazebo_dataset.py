@@ -99,76 +99,108 @@ class GazeboDatasetDownloader:
     
     def get_model_list_from_web(self) -> List[str]:
         """
-        Obtém lista de modelos fazendo scraping da página web.
+        Obtém lista de modelos do GoogleResearch usando scraping da página de busca.
         
         Returns:
             Lista de nomes de modelos
         """
+        return self._get_model_list_scraping()
+    
+    def _get_model_list_scraping(self) -> List[str]:
+        """Método de scraping da página web do Gazebo."""
         models = []
         page = 1
-        per_page = 20  # Gazebo mostra 20 por página
         
-        print(f"[INFO] Obtendo lista de modelos do GoogleResearch...")
+        print(f"[INFO] Buscando modelos do GoogleResearch na página do Gazebo...")
         
         while len(models) < self.max_objects:
             try:
-                search_url = f"{self.BASE_URL}/search"
-                params = {
-                    'q': self.GOOGLE_RESEARCH_OWNER,
-                    'type': 'models',
-                    'page': page
-                }
+                # URL de busca do Gazebo (formato correto: /search;q=termo)
+                search_url = f"{self.BASE_URL}/search;q={self.GOOGLE_RESEARCH_OWNER}"
                 
-                response = self.session.get(search_url, params=params, timeout=30)
+                response = self.session.get(search_url, timeout=30)
                 
                 if response.status_code != 200:
-                    print(f"[ERRO] Erro ao acessar página: {response.status_code}")
-                    break
+                    print(f"[AVISO] URL direta retornou {response.status_code}, tentando com parâmetros...")
+                    # Tentar com parâmetros GET
+                    search_url = f"{self.BASE_URL}/search"
+                    params = {'q': self.GOOGLE_RESEARCH_OWNER}
+                    response = self.session.get(search_url, params=params, timeout=30)
+                    if response.status_code != 200:
+                        print(f"[ERRO] Erro ao acessar página: {response.status_code}")
+                        break
                 
-                # Parse do HTML para extrair links de modelos
                 content = response.text
                 
-                if HAS_BS4:
-                    soup = BeautifulSoup(content, 'html.parser')
-                    # Procurar links de modelos
-                    links = soup.find_all('a', href=re.compile(r'/GoogleResearch/models/'))
-                    found_models = []
-                    for link in links:
-                        href = link.get('href', '')
-                        match = re.search(r'/GoogleResearch/models/([^/]+)', href)
-                        if match:
-                            model_name = match.group(1)
-                            if model_name not in found_models:
-                                found_models.append(model_name)
-                else:
-                    # Fallback: regex simples
-                    pattern = rf'/GoogleResearch/models/([^"\'<>/]+)'
-                    found_models = re.findall(pattern, content)
+                # Extrair nomes de modelos usando regex
+                # Padrões possíveis:
+                # /GoogleResearch/models/NOME_DO_MODELO
+                # href="/GoogleResearch/models/NOME"
+                patterns = [
+                    r'/GoogleResearch/models/([^"\'<>/\s?&]+)',
+                    r'href="[^"]*GoogleResearch/models/([^"\'<>/\s?&]+)',
+                    r'url.*GoogleResearch/models/([^"\'<>/\s?&]+)',
+                ]
                 
-                if not found_models:
-                    print(f"[INFO] Nenhum modelo encontrado na página {page}")
-                    break
+                found_models = set()
+                for pattern in patterns:
+                    matches = re.findall(pattern, content, re.IGNORECASE)
+                    found_models.update(matches)
                 
+                # Remover duplicatas e URLs codificadas
+                import urllib.parse
                 for model_name in found_models:
-                    if model_name not in models:
+                    # Decodificar URL encoding
+                    model_name = urllib.parse.unquote(model_name)
+                    # Limpar caracteres especiais
+                    model_name = model_name.strip()
+                    if model_name and model_name not in models and len(model_name) > 1:
                         models.append(model_name)
                         if len(models) >= self.max_objects:
                             break
                 
-                print(f"[INFO] Encontrados {len(models)} modelos até agora...")
+                if not found_models:
+                    print(f"[INFO] Nenhum modelo encontrado. Tentando método alternativo...")
+                    # Tentar acessar diretamente a página do owner
+                    owner_url = f"{self.BASE_URL}/{self.GOOGLE_RESEARCH_OWNER}/models"
+                    owner_response = self.session.get(owner_url, timeout=30)
+                    if owner_response.status_code == 200:
+                        content = owner_response.text
+                        for pattern in patterns:
+                            matches = re.findall(pattern, content, re.IGNORECASE)
+                            found_models.update(matches)
+                        for model_name in found_models:
+                            model_name = urllib.parse.unquote(model_name).strip()
+                            if model_name and model_name not in models and len(model_name) > 1:
+                                models.append(model_name)
+                                if len(models) >= self.max_objects:
+                                    break
+                    break
                 
-                # Verificar se há próxima página
-                if 'Next page' in content and 'disabled' not in content:
-                    page += 1
-                    time.sleep(1)  # Rate limiting
+                print(f"[INFO] Encontrados {len(models)} modelos únicos até agora...")
+                
+                # Se encontrou modelos mas não atingiu o limite, tentar próxima página
+                if len(models) < self.max_objects and found_models:
+                    # Verificar se há botão de próxima página
+                    if 'Next page' in content and 'disabled' not in content.lower():
+                        page += 1
+                        time.sleep(1)
+                    else:
+                        break
                 else:
                     break
                     
             except Exception as e:
-                print(f"[ERRO] Erro ao obter lista: {e}")
+                print(f"[ERRO] Erro no scraping: {e}")
+                import traceback
+                traceback.print_exc()
                 break
         
-        return models[:self.max_objects]
+        # Remover modelos inválidos (que não são do GoogleResearch)
+        valid_models = [m for m in models if m and not m.startswith('http') and len(m) > 1]
+        
+        print(f"[OK] Total de {len(valid_models)} modelos encontrados")
+        return valid_models[:self.max_objects]
     
     def get_model_info(self, model_name: str) -> Optional[Dict]:
         """
@@ -234,10 +266,23 @@ class GazeboDatasetDownloader:
                         download_url = file_info.get('download_url')
                         break
             
-            # 3. Se não tiver URL direta, tentar construir
+            # 3. Se não tiver URL direta, tentar construir URLs possíveis
             if not download_url:
-                # Tentar URL padrão do Fuel
-                download_url = f"{self.API_BASE}/1.0/{self.GOOGLE_RESEARCH_OWNER}/models/{model_name}/tip/files"
+                # Tentar diferentes formatos de URL do Fuel
+                possible_urls = [
+                    f"{self.API_BASE}/1.0/{self.GOOGLE_RESEARCH_OWNER}/models/{model_name}/tip/files",
+                    f"{self.API_BASE}/1.0/{self.GOOGLE_RESEARCH_OWNER}/models/{model_name}/files",
+                    f"{self.BASE_URL}/{self.GOOGLE_RESEARCH_OWNER}/models/{model_name}/files",
+                ]
+                
+                for url in possible_urls:
+                    try:
+                        test_response = self.session.head(url, timeout=10, allow_redirects=True)
+                        if test_response.status_code == 200:
+                            download_url = url
+                            break
+                    except:
+                        continue
             
             # 4. Baixar arquivos do modelo
             if download_url:
@@ -334,6 +379,20 @@ class GazeboDatasetDownloader:
         print("[INFO] Iniciando download do dataset GoogleResearch")
         print(f"[INFO] Objetivo: {self.max_objects} objetos")
         print("=" * 60)
+        
+        # Tentar usar a versão melhorada primeiro
+        try:
+            from scripts.download_gazebo_dataset_v2 import GazeboDatasetDownloaderV2
+            print("[INFO] Usando versão melhorada do downloader...")
+            downloader_v2 = GazeboDatasetDownloaderV2(
+                output_dir=str(self.output_dir),
+                max_objects=self.max_objects
+            )
+            downloader_v2.download_dataset()
+            return
+        except Exception as e:
+            print(f"[AVISO] Versão melhorada não disponível: {e}")
+            print("[INFO] Usando método padrão...")
         
         # Obter lista de modelos
         models = self.get_model_list_from_web()
