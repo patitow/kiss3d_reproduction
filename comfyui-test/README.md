@@ -47,12 +47,37 @@ comfyui-test/
 └── example_images/                # Imagens de exemplo (criar manualmente)
 ```
 
+## 🚀 Quick Start
+
+**Para fazer seu primeiro test run, siga o guia passo a passo:**
+👉 **[TEST_RUN_GUIDE.md](TEST_RUN_GUIDE.md)** - Guia completo de test run
+
+**Para verificar se tudo está configurado:**
+👉 **[setup_checklist.md](setup_checklist.md)** - Checklist de setup
+
 ## 🔧 Como Usar
 
-### Método 1: Interface do ComfyUI
+### Método 1: Teste Rápido (Recomendado para começar)
+
+1. **Verificar setup:**
+   ```bash
+   python test_comfyui_connection.py
+   ```
+
+2. **Teste workflow simples (sem LLM):**
+   ```bash
+   python test_workflow_simple.py --image path/to/image.jpg
+   ```
+
+3. **Teste completo (com LLM):**
+   ```bash
+   python integrate_llm.py --image path/to/image.jpg --ollama-model llava
+   ```
+
+### Método 2: Interface do ComfyUI
 
 1. Abra o ComfyUI
-2. Clique em "Load" e selecione `workflow_mesh3d.json`
+2. Clique em "Load" e selecione `workflow_mesh3d.json` ou `workflow_simple.json`
 3. Ajuste os seguintes parâmetros:
    - **LoadImage**: Selecione sua imagem de entrada
    - **Text Prompt**: Insira o texto descritivo detalhado (ou use o script Python para gerar via LLM)
@@ -60,7 +85,7 @@ comfyui-test/
    - **ControlNet Models**: Verifique se os caminhos dos modelos estão corretos
 4. Clique em "Queue Prompt" para executar
 
-### Método 2: API do ComfyUI + Script Python
+### Método 3: API do ComfyUI + Script Python
 
 Use o script `integrate_llm.py` para:
 - Gerar texto detalhado via LLM (Ollama) a partir da imagem

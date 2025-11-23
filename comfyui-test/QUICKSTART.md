@@ -124,6 +124,48 @@ Imagem → LLM (Texto) → Normal Map → ControlNet-Tile → ControlNet-Normal 
 - [ControlNet Models](https://huggingface.co/lllyasviel/ControlNet-v1-1)
 - [Ollama Models](https://ollama.com/library)
 
+## 🧪 Testando o Setup
+
+### Teste Rápido de Conexão
+
+Antes de executar workflows, teste se tudo está configurado:
+
+```bash
+cd comfyui-test
+python test_comfyui_connection.py
+```
+
+Este script verifica:
+- ✅ Se o ComfyUI está rodando
+- ✅ Se os workflows são válidos
+- ✅ Se o Ollama está disponível (opcional)
+
+### Teste de Workflow Simples (Sem LLM)
+
+Para testar o workflow sem usar LLM:
+
+```bash
+# Certifique-se de ter uma imagem de teste
+python test_workflow_simple.py --image path/to/test_image.jpg
+```
+
+Este script:
+- Faz upload da imagem para o ComfyUI
+- Envia o workflow simples
+- Mostra o Prompt ID para acompanhar
+
+### Teste Completo (Com LLM)
+
+Para testar o pipeline completo com LLM:
+
+```bash
+# Certifique-se de que o Ollama está rodando
+ollama serve
+
+# Execute o teste completo
+python integrate_llm.py --image path/to/test_image.jpg
+```
+
 ## ❓ Próximos Passos
 
 Depois de testar o workflow básico:
