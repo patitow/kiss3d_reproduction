@@ -1012,22 +1012,74 @@ def process_single_object(model_name: str, dataset_path: Path, output_path: Path
     
     print(f"[OK] Mesh original encontrado: {original_mesh.name}")
     
-     # 6. GERAR MESH VIA KISS3DGEN PIPELINE
-     # TODO: Implementar pipeline completo Kiss3DGen:
-     #   - Gerar reference 3D bundle image (Zero123)
-     #   - Gerar 3D bundle image final (Flux + ControlNet)
-     #   - Reconstruir mesh (LRM + ISOMER)
-     print(f"  [AVISO CRITICO] Pipeline Kiss3DGen completo ainda nao implementado")
-     print(f"  [AVISO] Usando mesh placeholder baseado no original (NAO E GERACAO REAL)")
-     print(f"  [AVISO] Texturas nao sao geradas via difusao - apenas copiadas do original")
+    # 6. GERAR MESH VIA PIPELINE PRÓPRIO (SEGUNDO ABORDAGEM KISS3DGEN)
+    print(f"  [INFO] Tentando usar pipeline próprio de geração 3D...")
+    
+    pipeline_available = False
+    generated_mesh_path = None
+    bundle_image_path = None
     
     try:
-        # Carregar mesh original de forma robusta
-        print(f"  [INFO] Carregando mesh original...")
-        original = load_mesh_properly(original_mesh, use_largest_component=True, make_watertight=True)
-        print(f"  [OK] Mesh original carregado: {len(original.vertices)} vertices, {len(original.faces)} faces")
-        print(f"  [INFO] Bounds: {original.bounds}")
-        print(f"  [INFO] Volume: {original.volume:.6f}")
+        from mesh3d_generator.pipeline.image_to_3d_pipeline import ImageTo3DPipeline
+        
+        # Inicializar pipeline próprio
+        print(f"  [INFO] Inicializando pipeline próprio...")
+        pipeline = ImageTo3DPipeline(
+            device="cuda:0",  # RTX 3060 12GB
+            zero123_model=None,  # Será carregado sob demanda
+            flux_model=None,
+            lrm_model=None,
+            caption_model=None
+        )
+        pipeline_available = True
+        
+        # Gerar modelo 3D usando pipeline próprio
+        object_name_safe = model_name.replace(' ', '_').replace('/', '_')
+        generated_mesh_path, bundle_image_path, description = pipeline.generate_3d_model(
+            input_image_path=str(input_image_for_pipeline),
+            output_dir=str(model_output_dir),
+            object_name=object_name_safe,
+            seed=42,
+            enable_redux=True,
+            use_mv_rgb=True,
+            use_controlnet=True,
+            strength1=0.5,
+            strength2=0.95
+        )
+        
+        if generated_mesh_path and Path(generated_mesh_path).exists():
+            print(f"  [OK] Modelo 3D gerado via pipeline próprio: {generated_mesh_path}")
+            print(f"  [OK] Bundle image: {bundle_image_path}")
+            
+            # Carregar mesh gerado para validação
+            generated_mesh = load_mesh_properly(Path(generated_mesh_path), use_largest_component=True, make_watertight=False)
+            print(f"  [OK] Mesh gerado carregado: {len(generated_mesh.vertices)} vertices, {len(generated_mesh.faces)} faces")
+        else:
+            print(f"  [AVISO] Pipeline próprio ainda não implementado completamente")
+            print(f"  [AVISO] Usando fallback (placeholder)")
+            pipeline_available = False
+            
+    except ImportError as e:
+        print(f"  [AVISO] Pipeline próprio não disponível: {e}")
+        print(f"  [AVISO] Usando fallback (placeholder)")
+    except Exception as e:
+        print(f"  [ERRO] Falha ao usar pipeline próprio: {e}")
+        import traceback
+        traceback.print_exc()
+        print(f"  [AVISO] Usando fallback (placeholder)")
+    
+    # Carregar mesh original de forma robusta (necessário para comparação)
+    print(f"  [INFO] Carregando mesh original...")
+    original = load_mesh_properly(original_mesh, use_largest_component=True, make_watertight=True)
+    print(f"  [OK] Mesh original carregado: {len(original.vertices)} vertices, {len(original.faces)} faces")
+    print(f"  [INFO] Bounds: {original.bounds}")
+    print(f"  [INFO] Volume: {original.volume:.6f}")
+    
+    # FALLBACK: Se pipeline próprio não estiver disponível, usar placeholder
+    if not pipeline_available or generated_mesh_path is None:
+        print(f"  [AVISO] Pipeline próprio de geração 3D ainda nao implementado completamente")
+        print(f"  [AVISO] Usando mesh placeholder baseado no original (NAO E GERACAO REAL)")
+        print(f"  [AVISO] Implementar: Zero123, Flux+ControlNet, LRM+ISOMER")
         
         # Criar mesh placeholder melhorado - usar simplificação ao invés de amostragem aleatória
         # Tentar criar uma versão aproximada do original usando simplificação
@@ -1085,53 +1137,52 @@ def process_single_object(model_name: str, dataset_path: Path, output_path: Path
             generated_mesh.update_faces(generated_mesh.unique_faces())
             generated_mesh.remove_unreferenced_vertices()
         
-        # AVISO: Atualmente estamos usando mesh placeholder
-        # CORREÇÃO NECESSÁRIA: Texturas devem ser GERADAS usando difusão baseada na imagem de input
-        # Seguir pipeline Kiss3DGen: gerar 3D bundle image via Flux diffusion
-        print(f"  [AVISO] Usando mesh placeholder - geração real via difusão ainda não implementada")
-        print(f"  [AVISO] Texturas devem ser GERADAS via difusão baseada na imagem de input")
-        
         # Nomear arquivos com nome do objeto
         object_name_safe = model_name.replace(' ', '_').replace('/', '_')
         generated_obj_name = f"generated_{object_name_safe}.obj"
-        original_obj_name = f"original_{object_name_safe}.obj"
         
-        # Exportar mesh gerado (sem texturas por enquanto - serão geradas via difusão)
+        # Exportar mesh gerado (placeholder)
         generated_mesh_path = model_output_dir / generated_obj_name
         generated_mesh.export(str(generated_mesh_path))
-        print(f"  [OK] Mesh gerado exportado: {generated_obj_name} ({len(generated_mesh.vertices)} vertices, {len(generated_mesh.faces)} faces)")
+        print(f"  [OK] Mesh placeholder exportado: {generated_obj_name} ({len(generated_mesh.vertices)} vertices, {len(generated_mesh.faces)} faces)")
         
-        # Copiar mesh original com nome adequado
-        original_mesh_copy_path = model_output_dir / original_obj_name
-        original_copy = original.copy()
-        original_copy.export(str(original_mesh_copy_path))
-        print(f"  [OK] Mesh original copiado: {original_obj_name}")
+        # Carregar mesh gerado para validação
+        generated_mesh = load_mesh_properly(Path(generated_mesh_path), use_largest_component=True, make_watertight=False)
+    
+    # Se Kiss3DGen gerou o mesh, ele já está salvo e carregado
+    # Agora processar mesh original e fazer comparação
+    object_name_safe = model_name.replace(' ', '_').replace('/', '_')
+    original_obj_name = f"original_{object_name_safe}.obj"
+    original_mesh_copy_path = model_output_dir / original_obj_name
+    original_copy = original.copy()
+    original_copy.export(str(original_mesh_copy_path))
+    print(f"  [OK] Mesh original copiado: {original_obj_name}")
+    
+    # Validar mesh gerado
+    print(f"  [INFO] Validando mesh gerado...")
+    try:
+        from mesh3d_generator.validation.mesh_metrics import validate_mesh_quality
+        generated_quality = validate_mesh_quality(generated_mesh)
+        print(f"  [INFO] Qualidade do mesh gerado:")
+        print(f"    - Watertight: {generated_quality.get('is_watertight', 'N/A')}")
+        print(f"    - Volume: {generated_quality.get('volume', 'N/A')}")
+        print(f"    - Componentes: {generated_quality.get('num_components', 'N/A')}")
         
-        # Validar mesh gerado
-        print(f"  [INFO] Validando mesh gerado...")
-        try:
-            from mesh3d_generator.validation.mesh_metrics import validate_mesh_quality
-            generated_quality = validate_mesh_quality(generated_mesh)
-            print(f"  [INFO] Qualidade do mesh gerado:")
-            print(f"    - Watertight: {generated_quality.get('is_watertight', 'N/A')}")
-            print(f"    - Volume: {generated_quality.get('volume', 'N/A')}")
-            print(f"    - Componentes: {generated_quality.get('num_components', 'N/A')}")
-            
-            # Tentar tornar watertight se não for
-            if not generated_quality.get('is_watertight', False):
-                print(f"  [INFO] Tentando tornar mesh watertight...")
-                try:
-                    generated_mesh.fill_holes()
-                    if generated_mesh.is_watertight:
-                        print(f"  [OK] Mesh agora é watertight")
-                        # Re-exportar mesh watertight
-                        generated_mesh.export(str(generated_mesh_path))
-                    else:
-                        print(f"  [AVISO] Não foi possível tornar mesh watertight")
-                except Exception as e:
-                    print(f"  [AVISO] Erro ao tentar tornar watertight: {e}")
-        except ImportError:
-            print(f"  [AVISO] Módulo de validação não disponível")
+        # Tentar tornar watertight se não for
+        if not generated_quality.get('is_watertight', False):
+            print(f"  [INFO] Tentando tornar mesh watertight...")
+            try:
+                generated_mesh.fill_holes()
+                if generated_mesh.is_watertight:
+                    print(f"  [OK] Mesh agora é watertight")
+                    # Re-exportar mesh watertight
+                    generated_mesh.export(str(generated_mesh_path))
+                else:
+                    print(f"  [AVISO] Não foi possível tornar mesh watertight")
+            except Exception as e:
+                print(f"  [AVISO] Erro ao tentar tornar watertight: {e}")
+    except ImportError:
+        print(f"  [AVISO] Módulo de validação não disponível")
         
         # Comparar modelos
         print(f"  [INFO] Comparando modelos...")
