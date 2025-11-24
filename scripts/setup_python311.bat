@@ -93,6 +93,26 @@ if exist "%NINJA_BIN%" (
     echo [AVISO] ninja.exe nao encontrado em %PROJECT_ROOT%. Coloque o binario la ou ajuste o caminho manualmente.
 )
 
+set "CACHE_ROOT=%PROJECT_ROOT%\.cache"
+set "HF_CACHE_DIR=%CACHE_ROOT%\huggingface"
+set "TORCH_CACHE_DIR=%CACHE_ROOT%\torch"
+
+if not exist "%CACHE_ROOT%" (
+    mkdir "%CACHE_ROOT%"
+)
+if not exist "%HF_CACHE_DIR%" (
+    mkdir "%HF_CACHE_DIR%"
+)
+if not exist "%TORCH_CACHE_DIR%" (
+    mkdir "%TORCH_CACHE_DIR%"
+)
+
+call :EnsureEnvVar HF_HOME "%HF_CACHE_DIR%"
+call :EnsureEnvVar HUGGINGFACE_HUB_CACHE "%HF_CACHE_DIR%\hub"
+call :EnsureEnvVar TRANSFORMERS_CACHE "%HF_CACHE_DIR%\transformers"
+call :EnsureEnvVar DIFFUSERS_CACHE "%HF_CACHE_DIR%\diffusers"
+call :EnsureEnvVar TORCH_HOME "%TORCH_CACHE_DIR%"
+
 REM Gerar script de ativacao rapida com variaveis de ambiente
 (
     echo @echo off
@@ -106,6 +126,14 @@ REM Gerar script de ativacao rapida com variaveis de ambiente
     ) else (
         echo REM Ajuste CUDA_HOME/CUDA_PATH conforme sua instalacao
     )
+    echo set "CACHE_ROOT=%%PROJECT_ROOT%%\.cache"
+    echo set "HF_HOME=%%CACHE_ROOT%%\huggingface"
+    echo set "HUGGINGFACE_HUB_CACHE=%%HF_HOME%%\hub"
+    echo set "TRANSFORMERS_CACHE=%%HF_HOME%%\transformers"
+    echo set "DIFFUSERS_CACHE=%%HF_HOME%%\diffusers"
+    echo set "TORCH_HOME=%%CACHE_ROOT%%\torch"
+    echo if not exist "%%HF_HOME%%" mkdir "%%HF_HOME%%"
+    echo if not exist "%%TORCH_HOME%%" mkdir "%%TORCH_HOME%%"
     echo if exist "%%PROJECT_ROOT%%\ninja.exe" set "PATH=%%PROJECT_ROOT%%;%%PATH%%"
     echo call "%%VENV_DIR%%\Scripts\activate.bat"
     echo echo [OK] Ambiente Kiss3DGen pronto.
@@ -155,3 +183,20 @@ if errorlevel 1 (
     echo [OK] PATH do usuario ja contem %TARGET_DIR%
 )
 exit /b 0
+
+:EnsureEnvVar
+set "VAR_NAME=%~1"
+set "VAR_VALUE=%~2"
+if "%VAR_NAME%"=="" goto :EOF
+if "%VAR_VALUE%"=="" goto :EOF
+for /f "tokens=2*" %%A in ('reg query HKCU\Environment /v %VAR_NAME% 2^>nul ^| find "REG_SZ"') do (
+    set "CURRENT_VALUE=%%B"
+)
+if /I "!CURRENT_VALUE!"=="%VAR_VALUE%" (
+    echo [OK] %VAR_NAME% ja aponta para %VAR_VALUE%
+) else (
+    setx %VAR_NAME% "%VAR_VALUE%" >nul
+    echo [OK] %VAR_NAME% definido para %VAR_VALUE%
+)
+set "CURRENT_VALUE="
+goto :EOF

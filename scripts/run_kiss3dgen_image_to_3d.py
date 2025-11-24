@@ -116,7 +116,7 @@ sys.path.insert(0, str(project_root))
 import argparse
 import shutil
 
-from kiss3d_utils_local import TMP_DIR, OUT_DIR
+from kiss3d_utils_local import TMP_DIR, OUT_DIR, ORIGINAL_WORKDIR
 from kiss3d_wrapper_local import init_wrapper_from_config, run_image_to_3d
 
 def main():
@@ -262,4 +262,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        os.chdir(str(ORIGINAL_WORKDIR))

@@ -4,6 +4,16 @@ import logging
 import time
 from pathlib import Path
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+KISS3D_ROOT = PROJECT_ROOT / "Kiss3DGen"
+
+if str(KISS3D_ROOT) not in sys.path:
+    sys.path.insert(0, str(KISS3D_ROOT))
+
+ORIGINAL_WORKDIR = Path.cwd()
+if ORIGINAL_WORKDIR != KISS3D_ROOT:
+    os.chdir(str(KISS3D_ROOT))
+
 import numpy as np
 import torch
 import torchvision
@@ -32,12 +42,6 @@ from utils.tool import (
     render_frames,
     mask_fix,
 )
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-KISS3D_ROOT = PROJECT_ROOT / "Kiss3DGen"
-
-if str(KISS3D_ROOT) not in sys.path:
-    sys.path.insert(0, str(KISS3D_ROOT))
 
 logger = logging.getLogger("kiss3d_wrapper_local")
 if not logger.handlers:

@@ -14,6 +14,23 @@ if exist "%CUDA_CANDIDATE%" (
     echo         Ajuste CUDA_HOME/CUDA_PATH manualmente se usar outro caminho.
 )
 
+set "CACHE_ROOT=%PROJECT_ROOT%\.cache"
+set "HF_CACHE_DIR=%CACHE_ROOT%\huggingface"
+set "TORCH_CACHE_DIR=%CACHE_ROOT%\torch"
+
+if not exist "%HF_CACHE_DIR%" (
+    mkdir "%HF_CACHE_DIR%"
+)
+if not exist "%TORCH_CACHE_DIR%" (
+    mkdir "%TORCH_CACHE_DIR%"
+)
+
+set "HF_HOME=%HF_CACHE_DIR%"
+set "HUGGINGFACE_HUB_CACHE=%HF_CACHE_DIR%\hub"
+set "TRANSFORMERS_CACHE=%HF_CACHE_DIR%\transformers"
+set "DIFFUSERS_CACHE=%HF_CACHE_DIR%\diffusers"
+set "TORCH_HOME=%TORCH_CACHE_DIR%"
+
 if exist "%PROJECT_ROOT%\ninja.exe" (
     set "PATH=%PROJECT_ROOT%;%PATH%"
 )
