@@ -111,105 +111,61 @@ if not kiss3dgen_path.exists():
     print(f"[INFO] Certifique-se de que o diretorio Kiss3DGen existe")
     sys.exit(1)
 
-# Salvar diretorio original antes de mudar
-original_cwd = os.getcwd()
-
-# Mudar para o diretorio do Kiss3DGen para que os caminhos relativos funcionem
-# IMPORTANTE: Mudar ANTES de importar qualquer coisa do Kiss3DGen
-# Isso é crítico porque alguns módulos carregam arquivos no nível do módulo
-os.chdir(str(kiss3dgen_path))
-print(f"[INFO] Diretorio de trabalho alterado para: {os.getcwd()}")
-
-sys.path.insert(0, str(kiss3dgen_path))
 sys.path.insert(0, str(project_root))
 
-# Importar bibliotecas padrão primeiro
 import argparse
-import torch
-from PIL import Image
-import numpy as np
 import shutil
 
-# Importar do Kiss3DGen - agora que estamos no diretorio correto
-# O diretório de trabalho já foi mudado, então os caminhos relativos funcionarão
-try:
-    from pipeline.kiss3d_wrapper import init_wrapper_from_config, run_image_to_3d
-    from pipeline.utils import TMP_DIR, OUT_DIR
-    print("[OK] Imports do Kiss3DGen bem-sucedidos")
-except ImportError as e:
-    print(f"[ERRO] Falha ao importar do Kiss3DGen: {e}")
-    print(f"[INFO] Certifique-se de que todas as dependencias do Kiss3DGen estao instaladas")
-    import traceback
-    traceback.print_exc()
-    os.chdir(original_cwd)
-    sys.exit(1)
-except Exception as e:
-    print(f"[ERRO] Erro ao importar do Kiss3DGen: {e}")
-    print(f"[INFO] Verifique se o diretorio Kiss3DGen esta correto e se os arquivos necessarios existem")
-    import traceback
-    traceback.print_exc()
-    os.chdir(original_cwd)
-    sys.exit(1)
+from kiss3d_utils_local import TMP_DIR, OUT_DIR
+from kiss3d_wrapper_local import init_wrapper_from_config, run_image_to_3d
 
 def main():
-    parser = argparse.ArgumentParser(description='Pipeline IMAGE TO 3D - Kiss3DGen')
-    parser.add_argument('--input', type=str, required=True, help='Caminho para imagem de input')
-    parser.add_argument('--output', type=str, default='data/outputs/kiss3dgen', help='Diretorio de saida')
-    parser.add_argument('--config', type=str, default='pipeline/pipeline_config/default.yaml', 
-                       help='Caminho para config YAML (relativo ao diretorio Kiss3DGen)')
-    parser.add_argument('--enable-redux', action='store_true', default=True, help='Habilitar Redux')
-    parser.add_argument('--use-mv-rgb', action='store_true', default=True, help='Usar RGB multiview')
-    parser.add_argument('--use-controlnet', action='store_true', default=True, help='Usar ControlNet')
+    parser = argparse.ArgumentParser(description="Pipeline IMAGE TO 3D - Kiss3DGen")
+    parser.add_argument("--input", type=str, required=True, help="Caminho para imagem de input")
+    parser.add_argument("--output", type=str, default="data/outputs/kiss3dgen", help="Diretorio de saida")
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="pipeline/pipeline_config/default.yaml",
+        help="Caminho para config YAML (relativo ao diretorio Kiss3DGen)",
+    )
+    parser.add_argument("--enable-redux", action="store_true", default=True, help="Habilitar Redux")
+    parser.add_argument("--use-mv-rgb", action="store_true", default=True, help="Usar RGB multiview")
+    parser.add_argument("--use-controlnet", action="store_true", default=True, help="Usar ControlNet")
     
     args = parser.parse_args()
     
-    # Converter caminhos para absolutos ANTES de mudar diretorio (já mudamos, então usar original_cwd)
+    original_cwd = os.getcwd()
+
+    # Converter caminhos para absolutos
     input_path = Path(args.input)
     if not input_path.is_absolute():
-        input_path = Path(original_cwd) / input_path
+        input_path = project_root / input_path
     args.input = str(input_path.resolve())
     
     output_path = Path(args.output)
     if not output_path.is_absolute():
-        output_path = Path(original_cwd) / output_path
+        output_path = project_root / output_path
     args.output = str(output_path.resolve())
     
-    # Ajustar caminho do config - agora estamos no diretorio Kiss3DGen
+    # Ajustar caminho do config relativo ao Kiss3DGen
     config_path = Path(args.config)
     if not config_path.is_absolute():
-        # Se o caminho começa com Kiss3DGen/, remover esse prefixo
-        config_str = str(config_path)
-        if config_str.startswith('Kiss3DGen/'):
-            config_str = config_str[len('Kiss3DGen/'):]
-        elif config_str.startswith('Kiss3DGen\\'):
-            config_str = config_str[len('Kiss3DGen\\'):]
-        
-        # Verificar se existe no diretorio Kiss3DGen (onde estamos agora)
-        test_path = Path(config_str)
-        if test_path.exists():
-            args.config = config_str
+        candidate = (kiss3dgen_path / config_path).resolve()
+        if candidate.exists():
+            args.config = str(candidate)
         else:
-            # Tentar caminho padrao
-            default_config = Path('pipeline/pipeline_config/default.yaml')
+            default_config = kiss3dgen_path / "pipeline" / "pipeline_config" / "default.yaml"
             if default_config.exists():
-                args.config = 'pipeline/pipeline_config/default.yaml'
+                args.config = str(default_config.resolve())
             else:
                 print(f"[ERRO] Config nao encontrado: {args.config}")
-                print(f"[INFO] Tentando usar config padrao...")
-                args.config = 'pipeline/pipeline_config/default.yaml'
+                sys.exit(1)
     else:
-        # Se for absoluto, converter para relativo ao Kiss3DGen
-        try:
-            args.config = str(Path(args.config).relative_to(kiss3dgen_path))
-        except ValueError:
-            # Se não for relativo, usar como está
-            pass
+        args.config = str(config_path.resolve())
     
-    # Criar diretorios
     os.makedirs(args.output, exist_ok=True)
     os.makedirs(TMP_DIR, exist_ok=True)
-    os.makedirs(OUT_DIR, exist_ok=True)
-    
     print("=" * 60)
     print("Pipeline IMAGE TO 3D - Kiss3DGen")
     print("=" * 60)
@@ -297,15 +253,13 @@ def main():
     except Exception as e:
         print(f"[ERRO] Falha ao copiar resultados: {e}")
         import traceback
+
         traceback.print_exc()
-    
+
     print("\n" + "=" * 60)
     print("Pipeline concluido!")
     print("=" * 60)
 
-if __name__ == '__main__':
-    try:
-        main()
-    finally:
-        # Garantir que sempre restaura o diretorio
-        os.chdir(original_cwd)
+
+if __name__ == "__main__":
+    main()
