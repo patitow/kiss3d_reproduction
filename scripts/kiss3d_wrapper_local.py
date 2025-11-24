@@ -69,6 +69,23 @@ def seed_everything(seed):
     print(f"Random seed set to {seed}")
 
 
+def _empty_cuda_cache():
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def _log_cuda_allocation(device, label):
+    if (
+        torch.cuda.is_available()
+        and isinstance(device, str)
+        and device.startswith("cuda")
+    ):
+        allocated = torch.cuda.memory_allocated(device=device) / 1024**3
+        logger.warning(
+            f"GPU memory allocated after {label} on {device}: {allocated} GB"
+        )
+
+
 class kiss3d_wrapper(object):
     def __init__(
         self,
@@ -82,6 +99,7 @@ class kiss3d_wrapper(object):
         reconstruction_model: Any,
         llm_model: AutoModelForCausalLM = None,
         llm_tokenizer: AutoTokenizer = None,
+        fast_mode: bool = False,
     ):
         self.config = config
         self.flux_pipeline = flux_pipeline
@@ -93,6 +111,19 @@ class kiss3d_wrapper(object):
         self.recon_model = reconstruction_model
         self.llm_model = llm_model
         self.llm_tokenizer = llm_tokenizer
+        self.fast_mode = fast_mode
+        self._recon_stage2 = self.config["reconstruction"].get("stage2_steps", 50)
+        fast_default = max(24, self._recon_stage2 // 2)
+        self._recon_stage2_fast = min(
+            self._recon_stage2,
+            self.config["reconstruction"].get("stage2_steps_fast", fast_default),
+        )
+        self.flux_height = self.config["flux"].get("image_height", 1024)
+        self.flux_width = self.config["flux"].get("image_width", 2048)
+        self.multiview_height = self.config["multiview"].get("image_height", 1024)
+        self.multiview_width = self.config["multiview"].get("image_width", self.multiview_height)
+        self.multiview_rows = self.config["multiview"].get("grid_rows", 2)
+        self.multiview_cols = self.config["multiview"].get("grid_cols", 2)
 
         self.to_512_tensor = torchvision.transforms.Compose(
             [
@@ -102,6 +133,9 @@ class kiss3d_wrapper(object):
         )
 
         self.renew_uuid()
+
+    def get_reconstruction_stage2_steps(self):
+        return self._recon_stage2_fast if self.fast_mode else self._recon_stage2
 
     def renew_uuid(self):
         self.uuid = uuid.uuid4()
@@ -154,20 +188,58 @@ class kiss3d_wrapper(object):
         return prompt
 
     def del_llm_model(self):
+        if self.llm_model is not None:
+            try:
+                self.llm_model.to("cpu")
+            except Exception:
+                pass
         self.llm_model = None
         self.llm_tokenizer = None
+        _empty_cuda_cache()
+
+    def release_text_models(self):
+        if self.caption_model is not None:
+            try:
+                self.caption_model.to("cpu")
+            except Exception:
+                pass
+            self.caption_model = None
+        self.del_llm_model()
+
+    def offload_multiview_pipeline(self):
+        if self.multiview_pipeline is not None:
+            try:
+                self.multiview_pipeline.to("cpu")
+            except Exception:
+                pass
+        _empty_cuda_cache()
+
+    def offload_flux_pipelines(self):
+        if self.flux_pipeline is not None:
+            try:
+                self.flux_pipeline.to("cpu")
+            except Exception:
+                pass
+        if self.flux_redux_pipeline is not None:
+            try:
+                self.flux_redux_pipeline.to("cpu")
+            except Exception:
+                pass
+        _empty_cuda_cache()
 
     def generate_multiview(self, image, seed=None, num_inference_steps=None):
         seed = seed or self.config["multiview"].get("seed", 0)
         mv_device = self.config["multiview"].get("device", "cpu")
+        gen_device = mv_device if isinstance(mv_device, str) and mv_device.startswith("cuda") else "cpu"
 
-        generator = torch.Generator(device=mv_device).manual_seed(seed)
-        with self.context():
+        generator = torch.Generator(device=gen_device).manual_seed(seed)
+        autocast_enabled = isinstance(mv_device, str) and mv_device.startswith("cuda")
+        with self.context(), torch.cuda.amp.autocast(enabled=autocast_enabled, dtype=torch.float16):
             mv_image = self.multiview_pipeline(
                 image,
                 num_inference_steps=num_inference_steps or self.config["multiview"]["num_inference_steps"],
-                width=512 * 2,
-                height=512 * 2,
+                width=self.multiview_width,
+                height=self.multiview_height,
                 generator=generator,
             ).images[0]
         return mv_image
@@ -177,13 +249,19 @@ class kiss3d_wrapper(object):
 
         rgb_multi_view = np.asarray(mv_image, dtype=np.float32) / 255.0
         rgb_multi_view = (
-            torch.from_numpy(rgb_multi_view).squeeze(0).permute(2, 0, 1).contiguous().float()
-        )  # (3, 1024, 2048)
-        rgb_multi_view = rearrange(rgb_multi_view, "c (n h) (m w) -> (n m) c h w", n=2, m=2).unsqueeze(0).to(
-            recon_device
+            torch.from_numpy(rgb_multi_view).squeeze(0).permute(2, 0, 1).contiguous()
         )
+        target_dtype = torch.float16 if isinstance(recon_device, str) and recon_device.startswith("cuda") else torch.float32
+        rgb_multi_view = rgb_multi_view.to(dtype=target_dtype)
+        rgb_multi_view = rearrange(
+            rgb_multi_view,
+            "c (n h) (m w) -> (n m) c h w",
+            n=self.multiview_rows,
+            m=self.multiview_cols,
+        ).unsqueeze(0).to(recon_device)
 
-        with self.context():
+        autocast_enabled = isinstance(recon_device, str) and recon_device.startswith("cuda")
+        with self.context(), torch.cuda.amp.autocast(enabled=autocast_enabled, dtype=torch.float16):
             vertices, faces, lrm_multi_view_normals, lrm_multi_view_rgb, lrm_multi_view_albedo = lrm_reconstruct(
                 self.recon_model,
                 self.recon_model_config.infer_config,
@@ -191,6 +269,7 @@ class kiss3d_wrapper(object):
                 name=self.uuid,
                 render_radius=lrm_render_radius,
             )
+        _empty_cuda_cache()
 
         return rgb_multi_view, vertices, faces, lrm_multi_view_normals, lrm_multi_view_rgb, lrm_multi_view_albedo
 
@@ -271,7 +350,12 @@ class kiss3d_wrapper(object):
         generator = torch.Generator(device=flux_device).manual_seed(seed)
 
         if image is None:
-            image = torch.zeros((1, 3, 1024, 2048), dtype=torch.float32, device=flux_device)
+            placeholder_dtype = torch.float16 if isinstance(flux_device, str) and flux_device.startswith("cuda") else torch.float32
+            image = torch.zeros(
+                (1, 3, self.flux_height, self.flux_width),
+                dtype=placeholder_dtype,
+                device=flux_device,
+            )
 
         hparam_dict = {
             "prompt": "A grid of 2x4 multi-view image, elevation 5. White background.",
@@ -281,8 +365,8 @@ class kiss3d_wrapper(object):
             "num_inference_steps": num_inference_steps,
             "guidance_scale": 3.5,
             "num_images_per_prompt": 1,
-            "width": 2048,
-            "height": 1024,
+            "width": self.flux_width,
+            "height": self.flux_height,
             "output_type": "np",
             "generator": generator,
             "joint_attention_kwargs": {"scale": lora_scale},
@@ -353,7 +437,12 @@ class kiss3d_wrapper(object):
         generator = torch.Generator(device=flux_device).manual_seed(seed)
 
         if image is None:
-            image = torch.zeros((1, 3, 1024, 2048), dtype=torch.float32, device=flux_device)
+            placeholder_dtype = torch.float16 if isinstance(flux_device, str) and flux_device.startswith("cuda") else torch.float32
+            image = torch.zeros(
+                (1, 3, self.flux_height, self.flux_width),
+                dtype=placeholder_dtype,
+                device=flux_device,
+            )
 
         hparam_dict = {
             "prompt": "A grid of 2x4 multi-view image, elevation 5. White background.",
@@ -363,8 +452,8 @@ class kiss3d_wrapper(object):
             "num_inference_steps": num_inference_steps,
             "guidance_scale": 3.5,
             "num_images_per_prompt": 1,
-            "width": 2048,
-            "height": 1024,
+            "width": self.flux_width,
+            "height": self.flux_height,
             "output_type": "np",
             "generator": generator,
             "joint_attention_kwargs": {"scale": lora_scale},
@@ -433,6 +522,7 @@ class kiss3d_wrapper(object):
         multi_view_mask = torch.ones_like(rgb_multi_view[:, [0], ...])
 
         vertices, faces = [], []
+        _empty_cuda_cache()
         with self.context():
             vertices, faces = lrm_reconstruct(
                 self.recon_model,
@@ -446,16 +536,20 @@ class kiss3d_wrapper(object):
             )[:2]
 
         save_paths = os.path.join(OUT_DIR, f"{self.uuid}.glb")
-        isomer_reconstruct(
-            rgb_multi_view,
-            normal_multi_view,
-            multi_view_mask,
-            vertices,
-            faces,
-            save_paths=[save_paths],
-            radius=isomer_radius,
-            reconstruction_stage2_steps=reconstruction_stage2_steps,
-        )
+        recon_device = self.config["reconstruction"].get("device", "cpu")
+        autocast_enabled = isinstance(recon_device, str) and recon_device.startswith("cuda")
+        with torch.cuda.amp.autocast(enabled=autocast_enabled, dtype=torch.float16):
+            isomer_reconstruct(
+                rgb_multi_view,
+                normal_multi_view,
+                multi_view_mask,
+                vertices,
+                faces,
+                save_paths=[save_paths],
+                radius=isomer_radius,
+                reconstruction_stage2_steps=reconstruction_stage2_steps,
+            )
+        _empty_cuda_cache()
 
         if save_intermediate_results:
             bundle_image_rendered = render_3d_bundle_image_from_mesh(save_paths)
@@ -465,9 +559,43 @@ class kiss3d_wrapper(object):
         return save_paths
 
 
-def init_wrapper_from_config(config_path):
+def init_wrapper_from_config(
+    config_path,
+    fast_mode=False,
+    disable_llm=False,
+    load_controlnet=True,
+    load_redux=True,
+):
     with open(config_path, "r") as config_file:
         config_ = yaml.load(config_file, yaml.FullLoader)
+
+    if torch.cuda.is_available():
+        total_mem_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        if not fast_mode and total_mem_gb <= 12.5:
+            fast_mode = True
+            logger.warning(
+                "VRAM <= %.1fGB detectada. Fast mode habilitado automaticamente para evitar OOM.",
+                total_mem_gb,
+            )
+
+    if fast_mode:
+        flux_fast = config_["flux"].get("num_inference_steps_fast")
+        if flux_fast:
+            config_["flux"]["num_inference_steps"] = min(
+                config_["flux"].get("num_inference_steps", flux_fast),
+                flux_fast,
+            )
+        mv_fast = config_["multiview"].get("num_inference_steps_fast")
+        if mv_fast:
+            config_["multiview"]["num_inference_steps"] = min(
+                config_["multiview"].get("num_inference_steps", mv_fast),
+                mv_fast,
+            )
+        recon_fast = config_["reconstruction"].get("stage2_steps_fast")
+        if recon_fast:
+            config_["reconstruction"]["stage2_steps"] = max(10, recon_fast)
+        config_["caption"]["device"] = "cpu"
+        disable_llm = True
 
     dtype_ = {
         "fp8": torch.float8_e4m3fn,
@@ -484,9 +612,9 @@ def init_wrapper_from_config(config_path):
         or config_["flux"].get("flux_dtype")
         or "bf16"
     )
-    flux_controlnet_pth = config_["flux"].get("controlnet", None)
+    flux_controlnet_pth = config_["flux"].get("controlnet", None) if load_controlnet else None
     flux_lora_pth = config_["flux"].get("lora", None)
-    flux_redux_pth = config_["flux"].get("redux", None)
+    flux_redux_pth = config_["flux"].get("redux", None) if load_redux else None
     flux_cpu_offload = config_["flux"].get("cpu_offload", False)
 
     if flux_base_model_pth.endswith("safetensors"):
@@ -554,16 +682,19 @@ def init_wrapper_from_config(config_path):
 
         _place_pipeline_on_device(flux_redux_pipe, "Flux Redux pipeline")
 
-    logger.warning(
-        f"GPU memory allocated after load flux model on {flux_device}: {torch.cuda.memory_allocated(device=flux_device) / 1024**3} GB"
-    )
+    _log_cuda_allocation(flux_device, "load flux model")
 
     logger.info("==> Loading multiview diffusion model ...")
     multiview_device = config_["multiview"].get("device", "cpu")
+    mv_dtype = (
+        torch.float16
+        if isinstance(multiview_device, str) and multiview_device.startswith("cuda")
+        else torch.float32
+    )
     multiview_pipeline = DiffusionPipeline.from_pretrained(
         config_["multiview"]["base_model"],
         custom_pipeline=config_["multiview"]["custom_pipeline"],
-        torch_dtype=torch.float16,
+        torch_dtype=mv_dtype,
     )
     multiview_pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
         multiview_pipeline.scheduler.config, timestep_spacing="trailing"
@@ -576,21 +707,22 @@ def init_wrapper_from_config(config_path):
     multiview_pipeline.unet.load_state_dict(state_dict, strict=True)
 
     multiview_pipeline.to(multiview_device)
-    logger.warning(
-        f"GPU memory allocated after load multiview model on {multiview_device}: {torch.cuda.memory_allocated(device=multiview_device) / 1024**3} GB"
-    )
+    _log_cuda_allocation(multiview_device, "load multiview model")
 
     logger.info("==> Loading caption model ...")
     caption_device = config_["caption"].get("device", "cpu")
+    caption_dtype = (
+        torch.bfloat16
+        if isinstance(caption_device, str) and caption_device.startswith("cuda")
+        else torch.float32
+    )
     caption_model = AutoModelForCausalLM.from_pretrained(
         config_["caption"]["base_model"],
-        torch_dtype=torch.bfloat16,
+        torch_dtype=caption_dtype,
         trust_remote_code=True,
     ).to(caption_device)
     caption_processor = AutoProcessor.from_pretrained(config_["caption"]["base_model"], trust_remote_code=True)
-    logger.warning(
-        f"GPU memory allocated after load caption model on {caption_device}: {torch.cuda.memory_allocated(device=caption_device) / 1024**3} GB"
-    )
+    _log_cuda_allocation(caption_device, "load caption model")
 
     logger.info("==> Loading reconstruction model ...")
     recon_device = config_["reconstruction"].get("device", "cpu")
@@ -602,22 +734,24 @@ def init_wrapper_from_config(config_path):
     state_dict = torch.load(model_ckpt_path, map_location="cpu")["state_dict"]
     state_dict = {k[14:]: v for k, v in state_dict.items() if k.startswith("lrm_generator.")}
     recon_model.load_state_dict(state_dict, strict=True)
+    if isinstance(recon_device, str) and recon_device.startswith("cuda"):
+        recon_model = recon_model.half()
     recon_model.to(recon_device)
     recon_model.init_flexicubes_geometry(recon_device, fovy=50.0)
     recon_model.eval()
-    logger.warning(
-        f"GPU memory allocated after load reconstruction model on {recon_device}: {torch.cuda.memory_allocated(device=recon_device) / 1024**3} GB"
-    )
+    _log_cuda_allocation(recon_device, "load reconstruction model")
 
-    llm_configs = config_.get("llm", None)
+    llm_configs = None if disable_llm else config_.get("llm", None)
     if llm_configs is not None:
         logger.info("==> Loading LLM ...")
         llm_device = llm_configs.get("device", "cpu")
-        llm, llm_tokenizer = load_llm_model(llm_configs["base_model"])
-        llm.to(llm_device)
-        logger.warning(
-            f"GPU memory allocated after load llm model on {llm_device}: {torch.cuda.memory_allocated(device=llm_device) / 1024**3} GB"
+        llm, llm_tokenizer = load_llm_model(
+            llm_configs["base_model"],
+            device_map=llm_device,
         )
+        if isinstance(llm_device, str) and llm_device.startswith("cuda"):
+            llm.to(llm_device)
+        _log_cuda_allocation(llm_device, "load llm model")
     else:
         llm, llm_tokenizer = None, None
 
@@ -632,6 +766,7 @@ def init_wrapper_from_config(config_path):
         reconstruction_model=recon_model,
         llm_model=llm,
         llm_tokenizer=llm_tokenizer,
+        fast_mode=fast_mode,
     )
 
 
@@ -644,7 +779,9 @@ def run_image_to_3d(k3d_wrapper, input_image_path, enable_redux=True, use_mv_rgb
     reference_3d_bundle_image, reference_save_path = k3d_wrapper.generate_reference_3D_bundle_image_zero123(
         input_image, use_mv_rgb=use_mv_rgb
     )
+    k3d_wrapper.offload_multiview_pipeline()
     caption = k3d_wrapper.get_image_caption(input_image)
+    k3d_wrapper.release_text_models()
 
     if enable_redux:
         redux_hparam = {
@@ -689,11 +826,13 @@ def run_image_to_3d(k3d_wrapper, input_image_path, enable_redux=True, use_mv_rgb
             redux_hparam=redux_hparam,
         )
 
+    k3d_wrapper.offload_flux_pipelines()
+
     recon_mesh_path = k3d_wrapper.reconstruct_3d_bundle_image(
         gen_3d_bundle_image,
         save_intermediate_results=False,
         isomer_radius=4.15,
-        reconstruction_stage2_steps=50,
+        reconstruction_stage2_steps=k3d_wrapper.get_reconstruction_stage2_steps(),
     )
 
     return gen_save_path, recon_mesh_path

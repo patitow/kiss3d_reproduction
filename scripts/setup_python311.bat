@@ -112,6 +112,8 @@ call :EnsureEnvVar HUGGINGFACE_HUB_CACHE "%HF_CACHE_DIR%\hub"
 call :EnsureEnvVar TRANSFORMERS_CACHE "%HF_CACHE_DIR%\transformers"
 call :EnsureEnvVar DIFFUSERS_CACHE "%HF_CACHE_DIR%\diffusers"
 call :EnsureEnvVar TORCH_HOME "%TORCH_CACHE_DIR%"
+call :EnsureEnvVar XFORMERS_FORCE_DISABLE_TRITON "1"
+call :EnsureEnvVar PYTORCH_CUDA_ALLOC_CONF "expandable_segments:True"
 
 REM Gerar script de ativacao rapida com variaveis de ambiente
 (

@@ -119,6 +119,9 @@ import shutil
 from kiss3d_utils_local import TMP_DIR, OUT_DIR, ORIGINAL_WORKDIR, ensure_hf_token
 from kiss3d_wrapper_local import init_wrapper_from_config, run_image_to_3d
 
+os.environ.setdefault("XFORMERS_FORCE_DISABLE_TRITON", "1")
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 def main():
     parser = argparse.ArgumentParser(description="Pipeline IMAGE TO 3D - Kiss3DGen")
     parser.add_argument("--input", type=str, required=True, help="Caminho para imagem de input")
@@ -132,6 +135,16 @@ def main():
     parser.add_argument("--enable-redux", action="store_true", default=True, help="Habilitar Redux")
     parser.add_argument("--use-mv-rgb", action="store_true", default=True, help="Usar RGB multiview")
     parser.add_argument("--use-controlnet", action="store_true", default=True, help="Usar ControlNet")
+    parser.add_argument(
+        "--fast-mode",
+        action="store_true",
+        help="Preset leve: menos passos, sem Redux/ControlNet, libera memoria agressivamente.",
+    )
+    parser.add_argument(
+        "--disable-llm",
+        action="store_true",
+        help="Desabilita refinamento de prompt com LLM (economiza VRAM/RAM).",
+    )
     
     args = parser.parse_args()
     
@@ -182,6 +195,10 @@ def main():
         print("[OK] Token HuggingFace carregado.")
     else:
         print("[AVISO] Token HuggingFace nao configurado; repositorios privados podem falhar.")
+
+    if args.fast_mode:
+        os.environ["KISS3D_FAST_MODE"] = "1"
+        args.enable_redux = False
     
     # Verificar se arquivo existe
     if not os.path.exists(args.input):
@@ -202,7 +219,16 @@ def main():
     # Inicializar wrapper do Kiss3DGen
     print("\n[1/4] Inicializando pipeline Kiss3DGen...")
     try:
-        k3d_wrapper = init_wrapper_from_config(args.config)
+        k3d_wrapper = init_wrapper_from_config(
+            args.config,
+            fast_mode=args.fast_mode,
+            disable_llm=args.disable_llm,
+            load_controlnet=args.use_controlnet,
+            load_redux=args.enable_redux,
+        )
+        if k3d_wrapper.fast_mode and not args.fast_mode:
+            print("[INFO] Fast mode ativado automaticamente (GPU <= 12GB detectada).")
+            args.enable_redux = False
         print("[OK] Pipeline inicializado")
     except Exception as e:
         print(f"[ERRO] Falha ao inicializar pipeline: {e}")

@@ -30,6 +30,8 @@ set "HUGGINGFACE_HUB_CACHE=%HF_CACHE_DIR%\hub"
 set "TRANSFORMERS_CACHE=%HF_CACHE_DIR%\transformers"
 set "DIFFUSERS_CACHE=%HF_CACHE_DIR%\diffusers"
 set "TORCH_HOME=%TORCH_CACHE_DIR%"
+set "XFORMERS_FORCE_DISABLE_TRITON=1"
+set "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
 
 if exist "%PROJECT_ROOT%\ninja.exe" (
     set "PATH=%PROJECT_ROOT%;%PATH%"
