@@ -572,44 +572,90 @@ class kiss3d_wrapper(object):
         reconstruction_stage2_steps=50,
         save_intermediate_results=True,
     ):
+        """
+        bundle_image: torch.Tensor, range [0., 1.], shape (3, H, W) ou (1, 3, H, W)
+        O bundle_image é um grid 2x4: 2 linhas (RGB no topo, normals embaixo), 4 colunas (4 vistas)
+        """
+        from utils.tool import get_background
+        
         bundle_image = bundle_image.cpu()
-        rgb_multi_view = bundle_image[:, [0, 1, 2, 3], ...]
-        normal_multi_view = bundle_image[:, [4, 5, 6, 7], ...]
-        multi_view_mask = torch.ones_like(rgb_multi_view[:, [0], ...])
+        if bundle_image.dim() == 4:
+            bundle_image = bundle_image.squeeze(0)  # (1, 3, H, W) -> (3, H, W)
+        
+        # O bundle_image tem shape (3, 1024, 2048) ou similar - é um grid 2x4
+        # Separar em 8 imagens: 4 RGB (linha superior) + 4 normals (linha inferior)
+        # Cada vista tem aproximadamente H/2 x W/4
+        H, W = bundle_image.shape[1], bundle_image.shape[2]
+        h_per_view = H // 2
+        w_per_view = W // 4
+        
+        # Reorganizar: (3, H, W) -> (8, 3, h_per_view, w_per_view)
+        images = rearrange(
+            bundle_image, 
+            'c (n h) (m w) -> (n m) c h w', 
+            n=2,  # 2 linhas (RGB + normals)
+            m=4,  # 4 colunas (4 vistas)
+            h=h_per_view,
+            w=w_per_view
+        )
+        
+        # Separar RGB (primeiras 4) e normals (últimas 4)
+        rgb_multi_view = images[:4]  # (4, 3, h, w)
+        normal_multi_view = images[4:]  # (4, 3, h, w)
+        
+        # Gerar máscara de background
+        recon_device = self.config["reconstruction"].get("device", "cpu")
+        multi_view_mask = get_background(normal_multi_view.unsqueeze(0)).to(recon_device).squeeze(0)
+        rgb_multi_view = rgb_multi_view.to(recon_device) * multi_view_mask + (1 - multi_view_mask)
 
         vertices, faces = [], []
         _empty_cuda_cache()
+        
+        # LRM reconstruction
         with self.context():
-            vertices, faces = lrm_reconstruct(
+            vertices, faces, lrm_multi_view_normals, lrm_multi_view_rgb, lrm_multi_view_albedo = lrm_reconstruct(
                 self.recon_model,
                 self.recon_model_config.infer_config,
-                rgb_multi_view,
+                rgb_multi_view.unsqueeze(0).to(recon_device),
                 name=self.uuid,
                 input_camera_type="kiss3d",
                 render_azimuths=[270, 0, 90, 180],
                 render_elevations=[5, 5, 5, 5],
                 render_radius=isomer_radius,
-            )[:2]
-
-        save_paths = os.path.join(OUT_DIR, f"{self.uuid}.glb")
+            )
+        
+        if save_intermediate_results:
+            recon_3D_bundle_image = torchvision.utils.make_grid(
+                torch.cat([lrm_multi_view_rgb.cpu(), (lrm_multi_view_normals.cpu() + 1) / 2], dim=0), 
+                nrow=4, 
+                padding=0
+            ).unsqueeze(0)
+            torchvision.utils.save_image(
+                recon_3D_bundle_image, 
+                os.path.join(TMP_DIR, f"{self.uuid}_lrm_recon_3d_bundle_image.png")
+            )
+        
+        # ISOMER reconstruction
+        save_paths = [os.path.join(OUT_DIR, f"{self.uuid}.glb"), os.path.join(OUT_DIR, f"{self.uuid}.obj")]
         isomer_reconstruct(
-            rgb_multi_view,
-            normal_multi_view,
-            multi_view_mask,
-            vertices,
-            faces,
-            save_paths=[save_paths],
+            rgb_multi_view=rgb_multi_view,
+            normal_multi_view=normal_multi_view,
+            multi_view_mask=multi_view_mask,
+            vertices=vertices,
+            faces=faces,
+            save_paths=save_paths,
             radius=isomer_radius,
+            reconstruction_stage1_steps=0,
             reconstruction_stage2_steps=reconstruction_stage2_steps,
         )
         _empty_cuda_cache()
 
         if save_intermediate_results:
-            bundle_image_rendered = render_3d_bundle_image_from_mesh(save_paths)
+            bundle_image_rendered = render_3d_bundle_image_from_mesh(save_paths[0])
             render_save_path = os.path.join(TMP_DIR, f"{self.uuid}_bundle_render.png")
             torchvision.utils.save_image(bundle_image_rendered, render_save_path)
 
-        return save_paths
+        return save_paths[0]  # Retorna o .glb
 
 
 def init_wrapper_from_config(
@@ -964,6 +1010,13 @@ def run_image_to_3d(k3d_wrapper, input_image_path, enable_redux=True, use_mv_rgb
 
     k3d_wrapper.offload_flux_pipelines()
 
+    # O gen_3d_bundle_image tem shape (1, 3, H, W) - é um grid 2x4 visualmente
+    # Precisamos garantir que está no formato correto para reconstruct_3d_bundle_image
+    if gen_3d_bundle_image.dim() == 4:
+        # Remover batch dimension se necessário
+        if gen_3d_bundle_image.shape[0] == 1:
+            gen_3d_bundle_image = gen_3d_bundle_image.squeeze(0)  # (1, 3, H, W) -> (3, H, W)
+    
     recon_mesh_path = k3d_wrapper.reconstruct_3d_bundle_image(
         gen_3d_bundle_image,
         save_intermediate_results=False,
