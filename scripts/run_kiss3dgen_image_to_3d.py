@@ -9,6 +9,15 @@ import sys
 import os
 from pathlib import Path
 
+# Adicionar ninja ao PATH antes de qualquer import
+venv_path = Path(__file__).parent.parent / "mesh3d-generator-py3.11"
+ninja_path = venv_path / "ninja" / "data" / "bin"
+if ninja_path.exists():
+    ninja_exe = str(ninja_path / "ninja.exe")
+    if os.path.exists(ninja_exe):
+        os.environ["PATH"] = str(ninja_path) + os.pathsep + os.environ.get("PATH", "")
+        print(f"[INFO] Ninja adicionado ao PATH: {ninja_path}")
+
 # Adicionar paths - IMPORTANTE: Kiss3DGen precisa estar no path
 kiss3dgen_path = Path(__file__).parent.parent / "Kiss3DGen"
 if not kiss3dgen_path.exists():

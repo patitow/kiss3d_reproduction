@@ -19,24 +19,79 @@ O projeto segue o seguinte pipeline:
 
 ### Pré-requisitos
 
-- Python 3.11 (recomendado)
-- Poetry (gerenciador de dependências)
+- **Python 3.11.9** (OBRIGATÓRIO - não use outras versões)
+- CUDA 11.8 ou 12.1 (para GPU NVIDIA)
+- Visual Studio C++ Build Tools (Windows - para compilar nvdiffrast)
+- Conta HuggingFace autenticada (para baixar modelos Flux)
 
-### Setup
+### Setup Rápido (Windows)
+
+```powershell
+# 1. Instalar Python 3.11.9
+# Baixar de: https://www.python.org/downloads/release/python-3119/
+# Marcar "Add Python to PATH" durante instalação
+
+# 2. Configurar ambiente virtual Python 3.11.9
+.\scripts\setup_python311.ps1
+# OU
+.\scripts\setup_python311.bat
+
+# 3. Ativar ambiente virtual
+.\mesh3d-generator-py3.11\Scripts\Activate.ps1
+
+# 4. Instalar PyTorch com CUDA (ajustar versão CUDA conforme sua GPU)
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+
+# 5. Instalar todas as dependências
+pip install -r requirements.txt
+# OU usar script automatizado:
+python scripts/install_dependencies.py
+
+# 6. Instalar diffusers customizado do Kiss3DGen
+cd Kiss3DGen
+pip install -e custom_diffusers/
+cd ..
+
+# 7. Autenticar no HuggingFace
+huggingface-cli login
+# OU
+python scripts/setup_huggingface_auth.py
+
+# 8. Baixar modelos necessários
+python scripts/download_models.py
+python scripts/download_redux.py  # Opcional
+python scripts/download_lrm.py   # Opcional
+```
+
+### Setup Manual
 
 ```bash
-# Instalar Poetry (se ainda não tiver)
-curl -sSL https://install.python-poetry.org | python3 -
+# 1. Criar ambiente virtual com Python 3.11.9
+python3.11 -m venv mesh3d-generator-py3.11
 
-# Clonar o repositório
-git clone <seu-repositorio>
-cd mesh3d-generator
+# 2. Ativar ambiente virtual
+# Windows:
+.\mesh3d-generator-py3.11\Scripts\activate
+# Linux/Mac:
+source mesh3d-generator-py3.11/bin/activate
 
-# Instalar dependências
-poetry install
+# 3. Atualizar pip
+pip install --upgrade pip setuptools wheel
 
-# Ativar o ambiente virtual
-poetry shell
+# 4. Instalar PyTorch com CUDA
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+
+# 5. Instalar dependências
+pip install -r requirements.txt
+
+# 6. Instalar pacotes via git (requer Visual Studio Build Tools no Windows)
+pip install git+https://github.com/NVlabs/nvdiffrast
+pip install "git+https://github.com/facebookresearch/pytorch3d.git@stable"
+
+# 7. Instalar diffusers customizado
+cd Kiss3DGen
+pip install -e custom_diffusers/
+cd ..
 ```
 
 ## 📁 Estrutura do Projeto
