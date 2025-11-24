@@ -36,7 +36,7 @@ class NormalMapGenerator:
             Normal map como array numpy (H, W, 3) com valores normalizados
         """
         # TODO: Implementar geração de normal map
-        raise NotImplementedError("Método generate() será implementado na Etapa 1")
+        raise NotImplementedError("Metodo generate() sera implementado na Etapa 1")
     
     def generate_from_path(self, image_path: str) -> np.ndarray:
         """

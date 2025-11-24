@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Coleta nomes de modelos do GoogleResearch via scraping das páginas."""
+"""Coleta nomes de modelos do GoogleResearch via scraping das paginas."""
 
 import json
 import time
@@ -17,7 +17,7 @@ except ImportError:
 
 
 class ModelNameCollector:
-    """Coleta nomes de modelos navegando pelas páginas."""
+    """Coleta nomes de modelos navegando pelas paginas."""
     
     BASE_URL = "https://app.gazebosim.org"
     OWNER = "GoogleResearch"
@@ -30,13 +30,13 @@ class ModelNameCollector:
         })
     
     def collect_all_names(self, max_models: int = 200) -> list:
-        """Coleta nomes navegando pelas páginas."""
+        """Coleta nomes navegando pelas paginas."""
         models = set()
         page = 1
         
         print(f"[INFO] Coletando nomes de modelos do {self.OWNER}...")
         print(f"[INFO] Objetivo: {max_models} modelos")
-        print(f"[INFO] Navegando pelas páginas (20 por página)...\n")
+        print(f"[INFO] Navegando pelas paginas (20 por pagina)...\n")
         
         while len(models) < max_models:
             try:
@@ -45,7 +45,7 @@ class ModelNameCollector:
                 if page > 1:
                     url += f"?page={page}"
                 
-                print(f"[INFO] Acessando página {page}...", end=" ", flush=True)
+                print(f"[INFO] Acessando pagina {page}...", end=" ", flush=True)
                 response = self.session.get(url, timeout=30)
                 
                 if response.status_code != 200:
@@ -63,7 +63,7 @@ class ModelNameCollector:
                 
                 # Verificar se há próxima página
                 if not self._has_next_page(response.text, page):
-                    print(f"\n[INFO] Última página alcançada")
+                    print(f"\n[INFO] Ultima pagina alcancada")
                     break
                 
                 if len(models) >= max_models:
@@ -73,7 +73,7 @@ class ModelNameCollector:
                 time.sleep(0.5)
                     
             except Exception as e:
-                print(f"\n[ERRO] Erro na página {page}: {e}")
+                print(f"\n[ERRO] Erro na pagina {page}: {e}")
                 break
         
         models_list = sorted(list(models))[:max_models]
@@ -102,7 +102,7 @@ class ModelNameCollector:
         return models
     
     def _has_next_page(self, html: str, current_page: int) -> bool:
-        """Verifica se há próxima página."""
+        """Verifica se ha proxima pagina."""
         # Verificar padrão de paginação
         page_info = re.search(r'(\d+)\s*[–-]\s*(\d+)\s+of\s+(\d+)', html)
         if page_info:
@@ -122,8 +122,8 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description="Coleta nomes de modelos do Gazebo")
-    parser.add_argument('--max-models', type=int, default=200, help='Número máximo de modelos')
-    parser.add_argument('--output', default='model_names.json', help='Arquivo de saída JSON')
+    parser.add_argument('--max-models', type=int, default=200, help='Numero maximo de modelos')
+    parser.add_argument('--output', default='model_names.json', help='Arquivo de saida JSON')
     
     args = parser.parse_args()
     

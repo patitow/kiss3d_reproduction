@@ -39,51 +39,89 @@ class Zero123MultiviewGenerator:
     def _load_model(self):
         """Carrega o modelo Zero123++"""
         try:
-            # Zero123++ usa um pipeline customizado que precisa ser carregado de forma especial
-            # Tentar diferentes métodos de carregamento
+            from diffusers import DiffusionPipeline
+            from diffusers.schedulers import EulerAncestralDiscreteScheduler
             
-            # Método 1: Tentar carregar com trust_remote_code (pode ter pipeline customizado)
+            print(f"[MULTIVIEW] Tentando carregar Zero123++...")
+            
+            # Zero123++ não tem variant fp16, carregar sem variant
+            # O modelo decide automaticamente qual precisão usar
             try:
-                from diffusers import DiffusionPipeline
-                from diffusers.schedulers import EulerAncestralDiscreteScheduler
-                
-                print(f"[MULTIVIEW] Tentando carregar Zero123++ com trust_remote_code...")
+                # Método 1: Carregar sem variant (modelo padrão)
+                print(f"[MULTIVIEW] Tentando carregar sem variant...")
                 self.pipeline = DiffusionPipeline.from_pretrained(
                     self.model_id,
                     torch_dtype=self.dtype,
                     trust_remote_code=True
                 )
-                
-                # Configurar scheduler
-                if hasattr(self.pipeline, 'scheduler'):
+                print(f"[MULTIVIEW] [OK] Pipeline carregado sem variant!")
+            except Exception as e1:
+                print(f"[MULTIVIEW] Erro ao carregar sem variant: {e1}")
+                # Método 2: Tentar com float32 (mais compatível)
+                try:
+                    print(f"[MULTIVIEW] Tentando carregar com float32...")
+                    self.pipeline = DiffusionPipeline.from_pretrained(
+                        self.model_id,
+                        torch_dtype=torch.float32,
+                        trust_remote_code=True
+                    )
+                    print(f"[MULTIVIEW] [OK] Pipeline carregado com float32!")
+                except Exception as e2:
+                    print(f"[MULTIVIEW] Erro ao carregar com float32: {e2}")
+                    # Método 3: Tentar sem especificar dtype
+                    try:
+                        print(f"[MULTIVIEW] Tentando carregar sem especificar dtype...")
+                        self.pipeline = DiffusionPipeline.from_pretrained(
+                            self.model_id,
+                            trust_remote_code=True
+                        )
+                        # Converter para dtype desejado após carregar
+                        if self.dtype != torch.float32:
+                            # Tentar converter componentes para dtype desejado
+                            for component_name in ['unet', 'vae', 'transformer']:
+                                if hasattr(self.pipeline, component_name):
+                                    component = getattr(self.pipeline, component_name)
+                                    if component is not None:
+                                        setattr(self.pipeline, component_name, component.to(dtype=self.dtype))
+                        print(f"[MULTIVIEW] [OK] Pipeline carregado e convertido!")
+                    except Exception as e3:
+                        print(f"[MULTIVIEW] Erro ao carregar: {e3}")
+                        raise
+            
+            # Configurar scheduler
+            if hasattr(self.pipeline, 'scheduler') and self.pipeline.scheduler is not None:
+                try:
                     self.pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
                         self.pipeline.scheduler.config,
                         timestep_spacing='trailing'
                     )
-                
-                self.pipeline = self.pipeline.to(self.device)
-                print(f"[MULTIVIEW] Pipeline carregado com sucesso (trust_remote_code)")
-                return
-                
-            except Exception as e1:
-                print(f"[MULTIVIEW] Método 1 falhou: {e1}")
+                except Exception:
+                    pass  # Manter scheduler original se não conseguir configurar
             
-            # Método 2: Tentar usar threestudio ou outra biblioteca
+            # Mover para device e otimizar VRAM
             try:
-                print(f"[MULTIVIEW] Tentando carregar via threestudio...")
-                # threestudio pode ter suporte para Zero123++
-                # Por enquanto, pular se não disponível
-                raise ImportError("threestudio não disponível")
-            except ImportError:
-                pass
+                # Habilitar CPU offload antes de mover para GPU (economiza VRAM)
+                if hasattr(self.pipeline, 'enable_model_cpu_offload'):
+                    self.pipeline.enable_model_cpu_offload()
+                    print(f"[MULTIVIEW] [OK] CPU offload habilitado")
+                else:
+                    # Se não tiver offload, mover para device
+                    self.pipeline = self.pipeline.to(self.device)
+                    print(f"[MULTIVIEW] [OK] Pipeline movido para {self.device}")
+            except Exception as e:
+                print(f"[MULTIVIEW] [AVISO] Erro ao configurar device: {e}")
+                # Tentar método simples
+                try:
+                    self.pipeline = self.pipeline.to(self.device)
+                except Exception as e2:
+                    print(f"[MULTIVIEW] [AVISO] Erro ao mover para device: {e2}")
             
-            # Método 3: Usar Stable Diffusion como fallback temporário
-            print(f"[MULTIVIEW] Zero123++ não disponível - usando fallback")
-            print(f"[MULTIVIEW] AVISO: Usando placeholder. Para Zero123++ real, instale dependências corretas")
-            self.pipeline = None
+            print(f"[MULTIVIEW] [OK] Zero123++ carregado com sucesso!")
+            return
             
         except Exception as e:
-            print(f"[MULTIVIEW] Erro geral ao carregar: {e}")
+            print(f"[MULTIVIEW] [AVISO] Zero123++ nao pode ser carregado: {e}")
+            print(f"[MULTIVIEW]    O pipeline funcionara mas com qualidade reduzida (usando fallback)")
             import traceback
             traceback.print_exc()
             self.pipeline = None
@@ -111,7 +149,7 @@ class Zero123MultiviewGenerator:
         
         # Se pipeline não estiver disponível, usar fallback
         if self.pipeline is None:
-            print(f"[MULTIVIEW] Pipeline não disponível - usando fallback (placeholder)")
+            print(f"[MULTIVIEW] Pipeline nao disponivel - usando fallback (placeholder)")
             return self._generate_multiview_fallback(input_image, azimuths, elevations)
         
         # Zero123++ espera imagem 512x512
@@ -128,49 +166,57 @@ class Zero123MultiviewGenerator:
             print(f"[MULTIVIEW] Gerando view {i+1}/{len(azimuths)}: azimuth={azimuth}°, elevation={elevation}°")
             
             try:
-                # Zero123++ pode usar diferentes APIs dependendo da implementação
+                # Zero123++ aceita condição de câmera via parâmetros específicos
                 # Tentar diferentes formatos de chamada
+                view_image = None
+                
+                # Tentativa 1: API com condição de câmera explícita
                 try:
-                    # Tentativa 1: API padrão do diffusers com condição de câmera
-                    # Zero123++ pode aceitar condição via prompt ou parâmetros específicos
-                    output = self.pipeline(
-                        input_image,
-                        num_inference_steps=num_inference_steps,
-                        generator=generator,
-                        width=512 * 2,
-                        height=512 * 2,
-                    )
-                    
-                    # Extrair imagem do output
-                    if hasattr(output, 'images'):
-                        view_image = output.images[0] if isinstance(output.images, list) else output.images
-                    elif isinstance(output, list):
-                        view_image = output[0]
-                    elif isinstance(output, Image.Image):
-                        view_image = output
-                    else:
-                        # Tentar acessar como dict
-                        view_image = output.get('images', [input_image])[0]
-                    
-                    views.append(view_image)
-                    
-                except Exception as e1:
-                    print(f"    [AVISO] Método 1 falhou: {e1}")
-                    # Tentativa 2: Usar prompt com condição de câmera
-                    try:
-                        prompt = f"elevation={elevation} azimuth={azimuth}"
+                    # Zero123++ pode aceitar elevation e azimuth como parâmetros
+                    if hasattr(self.pipeline, '__call__'):
+                        # Tentar chamada direta com imagem
                         output = self.pipeline(
-                            prompt=prompt,
                             image=input_image,
                             num_inference_steps=num_inference_steps,
                             generator=generator,
+                            elevation=elevation,
+                            azimuth=azimuth,
                         )
-                        view_image = output.images[0] if isinstance(output.images, list) else output.images
-                        views.append(view_image)
+                        
+                        # Extrair imagem
+                        if hasattr(output, 'images'):
+                            view_image = output.images[0] if isinstance(output.images, list) else output.images
+                        elif isinstance(output, list):
+                            view_image = output[0]
+                        elif isinstance(output, Image.Image):
+                            view_image = output
+                        elif isinstance(output, dict):
+                            view_image = output.get('images', [input_image])[0]
+                except Exception as e1:
+                    # Tentativa 2: API padrão img2img
+                    try:
+                        output = self.pipeline(
+                            prompt="",  # Zero123++ não precisa de prompt
+                            image=input_image,
+                            num_inference_steps=num_inference_steps,
+                            generator=generator,
+                            strength=0.75,
+                        )
+                        if hasattr(output, 'images'):
+                            view_image = output.images[0] if isinstance(output.images, list) else output.images
+                        elif isinstance(output, list):
+                            view_image = output[0]
+                        elif isinstance(output, Image.Image):
+                            view_image = output
                     except Exception as e2:
-                        print(f"    [AVISO] Método 2 falhou: {e2}")
-                        # Fallback: usar imagem de input redimensionada
-                        views.append(input_image.resize((1024, 1024)))
+                        print(f"    [AVISO] Metodo 2 falhou: {e2}")
+                
+                if view_image is None:
+                    # Fallback: usar imagem de input
+                    view_image = input_image.resize((1024, 1024))
+                    print(f"    [AVISO] Usando fallback para view {i+1}")
+                
+                views.append(view_image)
                 
             except Exception as e:
                 print(f"[MULTIVIEW] Erro ao gerar view {i+1}: {e}")

@@ -17,7 +17,7 @@ def main():
     repo_id = "black-forest-labs/FLUX.1-Redux-dev"
     
     print(f"\n[INFO] Baixando: {repo_id}")
-    print(f"[INFO] Este modelo é opcional mas recomendado para melhor qualidade")
+    print(f"[INFO] Este modelo e opcional mas recomendado para melhor qualidade")
     
     try:
         # Tentar baixar sem symlinks (Windows-friendly)
@@ -27,12 +27,12 @@ def main():
             local_dir_use_symlinks=False,  # Desabilitar symlinks para Windows
             resume_download=True
         )
-        print(f"\n✅ Redux baixado com sucesso!")
+        print(f"\n[OK] Redux baixado com sucesso!")
         return True
         
     except OSError as e:
-        if "symlink" in str(e).lower() or "privilégio" in str(e).lower():
-            print(f"\n⚠️  Erro de symlink (normal no Windows)")
+        if "symlink" in str(e).lower() or "privilegio" in str(e).lower():
+            print(f"\n[AVISO]  Erro de symlink (normal no Windows)")
             print(f"   A maioria dos arquivos foi baixada")
             print(f"   O modelo deve funcionar mesmo assim")
             
@@ -46,22 +46,22 @@ def main():
                     files.extend([os.path.join(root, f) for f in filenames if f.endswith(('.safetensors', '.json', '.bin'))])
                 
                 if len(files) > 5:
-                    print(f"   ✅ {len(files)} arquivos encontrados - modelo provavelmente OK")
+                    print(f"   [OK] {len(files)} arquivos encontrados - modelo provavelmente OK")
                     return True
                 else:
-                    print(f"   ⚠️  Poucos arquivos encontrados - pode precisar tentar novamente")
+                    print(f"   [AVISO]  Poucos arquivos encontrados - pode precisar tentar novamente")
                     return False
             else:
-                print(f"   ❌ Diretório do modelo não encontrado")
+                print(f"   [ERRO] Diretorio do modelo nao encontrado")
                 return False
         else:
-            print(f"\n❌ Erro ao baixar: {e}")
+            print(f"\n[ERRO] Erro ao baixar: {e}")
             import traceback
             traceback.print_exc()
             return False
     
     except Exception as e:
-        print(f"\n❌ Erro inesperado: {e}")
+        print(f"\n[ERRO] Erro inesperado: {e}")
         import traceback
         traceback.print_exc()
         return False

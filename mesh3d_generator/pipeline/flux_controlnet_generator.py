@@ -53,50 +53,91 @@ class FluxControlNetGenerator:
             
             print(f"[FLUX] Carregando Flux model: {self.flux_model_id}")
             
-            # Tentar carregar como single file primeiro
+            # Tentar carregar Flux
             try:
                 from diffusers import FluxImg2ImgPipeline
-                self.flux_pipeline = FluxImg2ImgPipeline.from_single_file(
-                    self.flux_model_id,
-                    torch_dtype=self.dtype
-                )
-            except:
-                # Fallback: carregar do HuggingFace
-                self.flux_pipeline = FluxImg2ImgPipeline.from_pretrained(
-                    self.flux_model_id,
-                    torch_dtype=self.dtype
-                )
+                
+                # Tentar carregar do HuggingFace (modelo já está baixado)
+                # Flux.1-dev não tem variant bf16, usar fp16 ou sem variant
+                try:
+                    # Tentar sem variant primeiro (usa o padrão do modelo)
+                    self.flux_pipeline = FluxImg2ImgPipeline.from_pretrained(
+                        self.flux_model_id,
+                        torch_dtype=self.dtype
+                    )
+                    print(f"[FLUX] [OK] Flux carregado do HuggingFace")
+                except Exception as e1:
+                    print(f"[FLUX] Erro ao carregar sem variant: {e1}")
+                    # Tentar com fp16
+                    try:
+                        self.flux_pipeline = FluxImg2ImgPipeline.from_pretrained(
+                            self.flux_model_id,
+                            torch_dtype=torch.float16,
+                            variant="fp16"
+                        )
+                        print(f"[FLUX] [OK] Flux carregado com fp16")
+                    except Exception as e2:
+                        print(f"[FLUX] Erro ao carregar com fp16: {e2}")
+                        # Tentar com dtype diferente
+                        try:
+                            self.flux_pipeline = FluxImg2ImgPipeline.from_pretrained(
+                                self.flux_model_id,
+                                torch_dtype=torch.float32
+                            )
+                            print(f"[FLUX] [OK] Flux carregado com float32")
+                        except Exception as e3:
+                            print(f"[FLUX] Erro ao carregar Flux: {e3}")
+                            raise
+            except ImportError as e:
+                print(f"[FLUX] FluxImg2ImgPipeline nao disponivel: {e}")
+                print(f"[FLUX] Tentando carregar como DiffusionPipeline generico...")
+                try:
+                    self.flux_pipeline = DiffusionPipeline.from_pretrained(
+                        self.flux_model_id,
+                        torch_dtype=self.dtype
+                    )
+                    print(f"[FLUX] [OK] Flux carregado como DiffusionPipeline generico")
+                except Exception as e3:
+                    print(f"[FLUX] Erro ao carregar como generico: {e3}")
+                    raise
             
-            # Configurar scheduler
-            self.flux_pipeline.scheduler = FlowMatchHeunDiscreteScheduler.from_config(
-                self.flux_pipeline.scheduler.config
-            )
+            # Não configurar scheduler - usar o padrão do modelo
+            # FlowMatchHeunDiscreteScheduler já vem configurado corretamente
+            # Tentar configurar pode causar erros de sigmas
+            print(f"[FLUX] Usando scheduler padrao do modelo")
             
             # Carregar ControlNet
             print(f"[FLUX] Carregando ControlNet: {self.controlnet_model_id}")
             try:
-                from diffusers.models.controlnets.controlnet_flux import FluxControlNetModel, FluxMultiControlNetModel
+                from diffusers import FluxControlNetImg2ImgPipeline
+                from diffusers.models.controlnets import FluxControlNetModel
                 
                 controlnet = FluxControlNetModel.from_pretrained(
                     self.controlnet_model_id,
-                    torch_dtype=torch.bfloat16
+                    torch_dtype=torch.bfloat16 if self.dtype == torch.bfloat16 else torch.float16
                 )
                 
                 # Converter pipeline para usar ControlNet
-                from diffusers import FluxControlNetImg2ImgPipeline
-                self.flux_pipeline = FluxControlNetImg2ImgPipeline(
-                    scheduler=self.flux_pipeline.scheduler,
-                    vae=self.flux_pipeline.vae,
-                    text_encoder=self.flux_pipeline.text_encoder,
-                    tokenizer=self.flux_pipeline.tokenizer,
-                    text_encoder_2=self.flux_pipeline.text_encoder_2,
-                    tokenizer_2=self.flux_pipeline.tokenizer_2,
-                    transformer=self.flux_pipeline.transformer,
-                    controlnet=[controlnet]
-                )
+                if hasattr(self.flux_pipeline, 'transformer'):
+                    self.flux_pipeline = FluxControlNetImg2ImgPipeline(
+                        scheduler=self.flux_pipeline.scheduler,
+                        vae=self.flux_pipeline.vae,
+                        text_encoder=self.flux_pipeline.text_encoder if hasattr(self.flux_pipeline, 'text_encoder') else None,
+                        tokenizer=self.flux_pipeline.tokenizer if hasattr(self.flux_pipeline, 'tokenizer') else None,
+                        text_encoder_2=self.flux_pipeline.text_encoder_2 if hasattr(self.flux_pipeline, 'text_encoder_2') else None,
+                        tokenizer_2=self.flux_pipeline.tokenizer_2 if hasattr(self.flux_pipeline, 'tokenizer_2') else None,
+                        transformer=self.flux_pipeline.transformer,
+                        controlnet=controlnet
+                    )
+                    print(f"[FLUX] [OK] ControlNet integrado")
+                else:
+                    print(f"[FLUX] [AVISO]  Pipeline nao tem transformer - continuando sem ControlNet")
                 
+            except ImportError as e:
+                print(f"[FLUX] [AVISO]  ControlNet nao disponivel (ImportError): {e}")
+                print("[FLUX] Continuando sem ControlNet")
             except Exception as e:
-                print(f"[FLUX] Erro ao carregar ControlNet: {e}")
+                print(f"[FLUX] [AVISO]  Erro ao carregar ControlNet: {e}")
                 print("[FLUX] Continuando sem ControlNet")
             
             # Carregar Redux (opcional)
@@ -106,12 +147,39 @@ class FluxControlNetGenerator:
                     # Redux geralmente é um pipeline customizado
                     # Referência: Kiss3DGen usa FluxPriorReduxPipeline
                     # Por enquanto, pular se não disponível
-                    print("[FLUX] Redux será carregado sob demanda")
+                    print("[FLUX] Redux sera carregado sob demanda")
                 except Exception as e:
-                    print(f"[FLUX] Redux não disponível: {e}")
+                    print(f"[FLUX] Redux nao disponivel: {e}")
             
-            # Mover para device
-            self.flux_pipeline = self.flux_pipeline.to(self.device)
+            # Mover para device e otimizar para VRAM (RTX 3060 12GB)
+            try:
+                # Habilitar offloading ANTES de mover para device (economiza VRAM)
+                if hasattr(self.flux_pipeline, 'enable_model_cpu_offload'):
+                    self.flux_pipeline.enable_model_cpu_offload()
+                    print(f"[FLUX] [OK] CPU offload habilitado (economiza VRAM)")
+                elif hasattr(self.flux_pipeline, 'enable_sequential_cpu_offload'):
+                    self.flux_pipeline.enable_sequential_cpu_offload()
+                    print(f"[FLUX] [OK] Sequential CPU offload habilitado")
+                else:
+                    # Se não tiver offload, mover apenas partes críticas para GPU
+                    # Deixar text encoders em CPU se possível
+                    if hasattr(self.flux_pipeline, 'text_encoder'):
+                        self.flux_pipeline.text_encoder = self.flux_pipeline.text_encoder.to('cpu')
+                    if hasattr(self.flux_pipeline, 'text_encoder_2'):
+                        self.flux_pipeline.text_encoder_2 = self.flux_pipeline.text_encoder_2.to('cpu')
+                    # Transformer e VAE na GPU
+                    if hasattr(self.flux_pipeline, 'transformer'):
+                        self.flux_pipeline.transformer = self.flux_pipeline.transformer.to(self.device)
+                    if hasattr(self.flux_pipeline, 'vae'):
+                        self.flux_pipeline.vae = self.flux_pipeline.vae.to(self.device)
+                    print(f"[FLUX] [OK] Modelo parcialmente em GPU (text encoders em CPU)")
+            except Exception as e:
+                print(f"[FLUX] [AVISO]  Aviso ao configurar device: {e}")
+                # Tentar método simples
+                try:
+                    self.flux_pipeline = self.flux_pipeline.to(self.device)
+                except Exception as e2:
+                    print(f"[FLUX] [AVISO]  Erro ao mover para device: {e2}")
             
             # Carregar LoRA se disponível
             try:
@@ -120,12 +188,12 @@ class FluxControlNetGenerator:
                     print(f"[FLUX] Carregando LoRA: {lora_path}")
                     self.flux_pipeline.load_lora_weights(lora_path)
             except Exception as e:
-                print(f"[FLUX] LoRA não disponível: {e}")
+                print(f"[FLUX] LoRA nao disponivel: {e}")
             
             print("[FLUX] Modelos carregados com sucesso")
             
         except ImportError as e:
-            print(f"[FLUX] Diffusers não disponível: {e}")
+            print(f"[FLUX] Diffusers nao disponivel: {e}")
             print("[FLUX] Instale: pip install diffusers")
             self.flux_pipeline = None
         except Exception as e:
@@ -162,8 +230,11 @@ class FluxControlNetGenerator:
         print("[FLUX] Gerando bundle image final...")
         
         if self.flux_pipeline is None:
-            print("[FLUX] Pipeline não disponível - usando reference bundle image")
-            return reference_bundle_image.clone(), ""
+            print("[FLUX] [AVISO]  Pipeline nao disponivel - carregando modelos...")
+            self._load_models()
+            if self.flux_pipeline is None:
+                print("[FLUX] [ERRO] Nao foi possivel carregar pipeline - usando reference bundle image")
+                return reference_bundle_image.clone(), ""
         
         try:
             # Preparar prompt
@@ -171,7 +242,15 @@ class FluxControlNetGenerator:
             full_prompt = f"{base_prompt} {prompt}"
             
             # Preparar imagem de input (reference bundle)
-            image_input = reference_bundle_image.unsqueeze(0).to(self.device)  # (1, 3, 1024, 2048)
+            # Garantir que está no formato correto: (1, 3, H, W) em range [0, 1]
+            if len(reference_bundle_image.shape) == 3:
+                image_input = reference_bundle_image.unsqueeze(0).to(self.device)  # (1, 3, H, W)
+            else:
+                image_input = reference_bundle_image.to(self.device)
+            
+            # Garantir range [0, 1]
+            if image_input.max() > 1.0:
+                image_input = image_input / 255.0
             
             # Preparar Redux se habilitado
             redux_hparam = None
@@ -210,39 +289,81 @@ class FluxControlNetGenerator:
             if seed is not None:
                 generator.manual_seed(seed)
             
-            # Preparar parâmetros
+            # Preparar parâmetros básicos
+            # Flux ControlNet Image2Image não usa num_inference_steps da mesma forma
+            # Usar timesteps ao invés
             kwargs = {
-                'prompt': base_prompt,
-                'prompt_2': full_prompt,
+                'prompt': full_prompt,
                 'image': image_input,
                 'strength': strength,
-                'num_inference_steps': num_inference_steps,
                 'guidance_scale': 3.5,
-                'width': 2048,
-                'height': 1024,
-                'output_type': 'np',
+                'output_type': 'pt',  # Retornar como tensor PyTorch
                 'generator': generator,
             }
             
+            # Adicionar num_inference_steps apenas se o pipeline suportar
+            # Flux pode usar timesteps diferentes
+            if hasattr(self.flux_pipeline, 'scheduler'):
+                # Flux usa timesteps, não num_inference_steps diretamente
+                # O scheduler gerencia isso automaticamente
+                pass
+            else:
+                kwargs['num_inference_steps'] = num_inference_steps
+            
+            # Adicionar prompt_2 se o pipeline suportar
+            if hasattr(self.flux_pipeline, 'tokenizer_2'):
+                kwargs['prompt_2'] = full_prompt
+            
             # Adicionar ControlNet se disponível
-            if control_image is not None:
-                kwargs.update({
-                    'control_image': [control_image],
-                    'control_mode': [1],  # Tile mode
-                    'control_guidance_start': [0.0],
-                    'control_guidance_end': [0.65],
-                    'controlnet_conditioning_scale': [0.6],
-                })
+            if control_image is not None and hasattr(self.flux_pipeline, 'controlnet'):
+                try:
+                    kwargs.update({
+                        'control_image': control_image,
+                        'controlnet_conditioning_scale': 0.6,
+                    })
+                except Exception as e:
+                    print(f"[FLUX] Aviso ao adicionar ControlNet: {e}")
             
             # Adicionar Redux se disponível
-            if redux_hparam:
+            if redux_hparam and self.redux_pipeline is not None:
                 # Redux modifica prompt_embeds
                 # Por enquanto, pular se não implementado
                 pass
             
+            # Limpar cache CUDA antes de gerar
+            torch.cuda.empty_cache()
+            
             # Gerar
             with torch.no_grad():
-                output = self.flux_pipeline(**kwargs)
+                try:
+                    output = self.flux_pipeline(**kwargs)
+                except torch.cuda.OutOfMemoryError as e:
+                    print(f"[FLUX] [AVISO]  CUDA OOM: {e}")
+                    print(f"[FLUX] Tentando com configuracoes mais leves...")
+                    # Limpar cache
+                    torch.cuda.empty_cache()
+                    # Tentar com parâmetros reduzidos
+                    kwargs_simple = {
+                        'prompt': full_prompt,
+                        'image': image_input,
+                        'strength': min(strength, 0.8),  # Reduzir strength
+                        'num_inference_steps': min(num_inference_steps, 8),  # Reduzir passos
+                        'guidance_scale': 2.0,  # Reduzir guidance
+                        'output_type': 'pt',
+                        'generator': generator,
+                    }
+                    try:
+                        output = self.flux_pipeline(**kwargs_simple)
+                    except Exception as e2:
+                        print(f"[FLUX] [ERRO] Erro mesmo com configuracoes leves: {e2}")
+                        # Fallback: retornar reference bundle image
+                        return reference_bundle_image.clone(), ""
+                except Exception as e:
+                    print(f"[FLUX] Erro na geracao: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    # Fallback: retornar reference bundle image
+                    return reference_bundle_image.clone(), ""
             
             # Converter output para tensor
             if isinstance(output, dict):
@@ -250,12 +371,34 @@ class FluxControlNetGenerator:
             else:
                 images = output
             
-            if isinstance(images, np.ndarray):
-                gen_image = torch.from_numpy(images).squeeze(0).permute(2, 0, 1).float() / 255.0
+            # Extrair imagem do output
+            if isinstance(images, torch.Tensor):
+                # Já é tensor
+                if len(images.shape) == 4:
+                    gen_image = images[0]  # Remover batch dimension
+                else:
+                    gen_image = images
+                # Garantir formato (C, H, W)
+                if gen_image.shape[0] != 3:
+                    gen_image = gen_image.permute(2, 0, 1) if len(gen_image.shape) == 3 else gen_image
+            elif isinstance(images, np.ndarray):
+                gen_image = torch.from_numpy(images).squeeze(0)
+                if len(gen_image.shape) == 3 and gen_image.shape[2] == 3:
+                    gen_image = gen_image.permute(2, 0, 1)
+                gen_image = gen_image.float() / 255.0 if gen_image.max() > 1.0 else gen_image.float()
+            elif isinstance(images, list):
+                gen_image = transforms.ToTensor()(images[0]).float()
+            elif isinstance(images, Image.Image):
+                gen_image = transforms.ToTensor()(images).float()
             else:
-                gen_image = transforms.ToTensor()(images[0] if isinstance(images, list) else images).float()
+                # Fallback
+                print(f"[FLUX] Formato de output inesperado: {type(images)}")
+                gen_image = reference_bundle_image.clone()
             
-            # Ajustar tamanho se necessário
+            # Garantir range [0, 1]
+            gen_image = torch.clamp(gen_image, 0, 1)
+            
+            # Ajustar tamanho se necessário para (3, 1024, 2048)
             if gen_image.shape != (3, 1024, 2048):
                 gen_image = torch.nn.functional.interpolate(
                     gen_image.unsqueeze(0),
@@ -280,7 +423,7 @@ class FluxControlNetGenerator:
             return gen_image, save_path
             
         except Exception as e:
-            print(f"[FLUX] Erro na geração: {e}")
+            print(f"[FLUX] Erro na geracao: {e}")
             import traceback
             traceback.print_exc()
             return reference_bundle_image.clone(), ""

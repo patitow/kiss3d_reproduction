@@ -259,8 +259,8 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description="Download direto de modelos Gazebo")
-    parser.add_argument('--max-models', type=int, default=200, help='Número máximo')
-    parser.add_argument('--output', default='data/raw/gazebo_dataset', help='Diretório de saída')
+    parser.add_argument('--max-models', type=int, default=200, help='Numero maximo')
+    parser.add_argument('--output', default='data/raw/gazebo_dataset', help='Diretorio de saida')
     
     args = parser.parse_args()
     

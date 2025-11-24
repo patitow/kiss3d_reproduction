@@ -1,4 +1,4 @@
-"""Utilitários para o projeto"""
+"""Utilitarios para o projeto"""
 
 from mesh3d_generator.utils.data_loader import DataLoader
 from mesh3d_generator.utils.visualization import Visualizer

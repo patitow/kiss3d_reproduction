@@ -50,7 +50,7 @@ class TextToImageGenerator:
                 enhanced = self.llm_generator.generate_prompt_for_text_to_image(prompt)
                 return enhanced
             except Exception as e:
-                print(f"⚠️  Erro ao melhorar prompt com LLM: {e}")
+                print(f"[AVISO]  Erro ao melhorar prompt com LLM: {e}")
                 print(f"   Usando prompt original")
                 return prompt
         return prompt
@@ -73,10 +73,10 @@ class TextToImageGenerator:
         
         if enhance_prompt:
             prompt = self._enhance_prompt(prompt)
-            print(f"📝 Prompt melhorado: {prompt[:100]}...")
+            print(f" Prompt melhorado: {prompt[:100]}...")
         
         # TODO: Implementar geração de imagem
-        raise NotImplementedError("Método generate() será implementado na Etapa 0")
+        raise NotImplementedError("Metodo generate() sera implementado na Etapa 0")
     
     def generate_batch(self, prompts: list[str], **kwargs) -> list[Image.Image]:
         """

@@ -37,7 +37,7 @@ class LRMInitializer:
             Malha 3D (trimesh.Trimesh)
         """
         # TODO: Implementar inicialização com LRM
-        raise NotImplementedError("Método initialize() será implementado na Etapa 2")
+        raise NotImplementedError("Metodo initialize() sera implementado na Etapa 2")
     
     def initialize_from_path(self, image_path: str, normal_map_path: Optional[str] = None) -> trimesh.Trimesh:
         """

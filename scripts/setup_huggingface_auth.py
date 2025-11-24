@@ -11,14 +11,14 @@ from huggingface_hub import login, whoami
 
 def main():
     print("="*60)
-    print("CONFIGURAÇÃO DE AUTENTICAÇÃO HUGGINGFACE")
+    print("CONFIGURACAO DE AUTENTICACAO HUGGINGFACE")
     print("="*60)
     
-    print("\n[INFO] Modelos restritos (gated) requerem autenticação:")
+    print("\n[INFO] Modelos restritos (gated) requerem autenticacao:")
     print("   - black-forest-labs/FLUX.1-dev")
     print("   - black-forest-labs/FLUX.1-Redux-dev")
     
-    print("\n[INFO] Para baixar esses modelos, você precisa:")
+    print("\n[INFO] Para baixar esses modelos, voce precisa:")
     print("   1. Criar conta no HuggingFace: https://huggingface.co/join")
     print("   2. Aceitar os termos de uso do modelo:")
     print("      https://huggingface.co/black-forest-labs/FLUX.1-dev")
@@ -30,15 +30,15 @@ def main():
     # Verificar se já está autenticado
     try:
         user = whoami()
-        print(f"\n✅ Já autenticado como: {user.get('name', 'Unknown')}")
+        print(f"\n[OK] Ja autenticado como: {user.get('name', 'Unknown')}")
         print(f"   Email: {user.get('email', 'Unknown')}")
         
         response = input("\nDeseja fazer logout e autenticar novamente? (s/N): ")
         if response.lower() != 's':
-            print("✅ Mantendo autenticação atual")
+            print("[OK] Mantendo autenticacao atual")
             return True
     except Exception:
-        print("\n⚠️  Não autenticado")
+        print("\n[AVISO]  Nao autenticado")
     
     # Solicitar token
     print("\n[INFO] Cole seu token do HuggingFace abaixo")
@@ -46,7 +46,7 @@ def main():
     token = input("Token: ").strip()
     
     if not token:
-        print("⚠️  Token não fornecido. Pulando autenticação.")
+        print("[AVISO]  Token nao fornecido. Pulando autenticacao.")
         print("\n💡 Para autenticar depois, execute:")
         print("   huggingface-cli login")
         print("   ou")
@@ -56,12 +56,12 @@ def main():
     try:
         login(token=token)
         user = whoami()
-        print(f"\n✅ Autenticado com sucesso!")
-        print(f"   Usuário: {user.get('name', 'Unknown')}")
+        print(f"\n[OK] Autenticado com sucesso!")
+        print(f"   Usuario: {user.get('name', 'Unknown')}")
         return True
     except Exception as e:
-        print(f"\n❌ Erro na autenticação: {e}")
-        print("\n💡 Verifique se o token está correto")
+        print(f"\n[ERRO] Erro na autenticacao: {e}")
+        print("\n💡 Verifique se o token esta correto")
         return False
 
 if __name__ == "__main__":

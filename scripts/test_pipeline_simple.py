@@ -19,11 +19,11 @@ def test_pipeline():
     """Testa o pipeline com uma imagem simples"""
     
     print("="*60)
-    print("TESTE DO PIPELINE DE GERAÇÃO 3D")
+    print("TESTE DO PIPELINE DE GERACAO 3D")
     print("="*60)
     
     # Verificar CUDA
-    print(f"\n[INFO] CUDA disponível: {torch.cuda.is_available()}")
+    print(f"\n[INFO] CUDA disponivel: {torch.cuda.is_available()}")
     if torch.cuda.is_available():
         print(f"[INFO] GPU: {torch.cuda.get_device_name(0)}")
         print(f"[INFO] VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
@@ -87,7 +87,7 @@ def test_pipeline():
         return False
     
     print("\n" + "="*60)
-    print("TESTE CONCLUÍDO COM SUCESSO!")
+    print("TESTE CONCLUIDO COM SUCESSO!")
     print("="*60)
     return True
 

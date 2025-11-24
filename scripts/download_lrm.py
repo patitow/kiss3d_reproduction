@@ -17,7 +17,7 @@ def main():
     repo_id = "LTT/PRM"
     
     print(f"\n[INFO] Baixando: {repo_id}")
-    print(f"[INFO] Este modelo é usado para reconstrução inicial de mesh 3D")
+    print(f"[INFO] Este modelo e usado para reconstrucao inicial de mesh 3D")
     
     try:
         # Tentar baixar sem symlinks (Windows-friendly)
@@ -27,19 +27,19 @@ def main():
             local_dir_use_symlinks=False,  # Desabilitar symlinks para Windows
             resume_download=True
         )
-        print(f"\n✅ LRM baixado com sucesso!")
+        print(f"\n[OK] LRM baixado com sucesso!")
         return True
         
     except Exception as e:
-        print(f"\n❌ Erro ao baixar: {e}")
+        print(f"\n[ERRO] Erro ao baixar: {e}")
         
         # Verificar se o modelo existe ou se precisa de autenticação
         if "401" in str(e) or "unauthorized" in str(e).lower():
-            print(f"\n⚠️  Modelo pode requerer autenticação no HuggingFace")
+            print(f"\n[AVISO]  Modelo pode requerer autenticacao no HuggingFace")
             print(f"   Tente autenticar primeiro: huggingface-cli login")
         elif "404" in str(e) or "not found" in str(e).lower():
-            print(f"\n⚠️  Modelo não encontrado no HuggingFace")
-            print(f"   Verifique se o repo_id está correto: {repo_id}")
+            print(f"\n[AVISO]  Modelo nao encontrado no HuggingFace")
+            print(f"   Verifique se o repo_id esta correto: {repo_id}")
         else:
             import traceback
             traceback.print_exc()

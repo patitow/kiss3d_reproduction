@@ -21,7 +21,7 @@ try:
     HAS_BS4 = True
 except ImportError:
     HAS_BS4 = False
-    print("[AVISO] beautifulsoup4 não instalado. Instale com: pip install beautifulsoup4")
+    print("[AVISO] beautifulsoup4 nao instalado. Instale com: pip install beautifulsoup4")
 
 
 class SmartGazeboDownloader:
@@ -54,13 +54,13 @@ class SmartGazeboDownloader:
         self.failed = 0
     
     def scrape_all_model_names(self) -> List[str]:
-        """Faz scraping navegando pelas páginas para obter lista completa de nomes."""
+        """Faz scraping navegando pelas paginas para obter lista completa de nomes."""
         models = set()
         page = 1
         
         print(f"[INFO] Fazendo scraping de modelos do {self.OWNER}...")
         print(f"[INFO] Objetivo: {self.max_models} modelos")
-        print(f"[INFO] Navegando pelas páginas (20 modelos por página)...\n")
+        print(f"[INFO] Navegando pelas paginas (20 modelos por pagina)...\n")
         
         while len(models) < self.max_models:
             try:
@@ -73,7 +73,7 @@ class SmartGazeboDownloader:
                 response = self.session.get(url, timeout=30)
                 
                 if response.status_code != 200:
-                    print(f"[AVISO] Erro {response.status_code} na página {page}")
+                    print(f"[AVISO] Erro {response.status_code} na pagina {page}")
                     break
                 
                 # Extrair nomes de modelos da página atual
@@ -100,9 +100,9 @@ class SmartGazeboDownloader:
                 
                 if page_models:
                     models.update(page_models)
-                    print(f"[INFO] Página {page}: {len(page_models)} modelos encontrados | Total acumulado: {len(models)}")
+                    print(f"[INFO] Pagina {page}: {len(page_models)} modelos encontrados | Total acumulado: {len(models)}")
                 else:
-                    print(f"[AVISO] Página {page}: Nenhum modelo encontrado")
+                    print(f"[AVISO] Pagina {page}: Nenhum modelo encontrado")
                 
                 # Verificar se há próxima página
                 # Procurar por "Next page" button que não está disabled
@@ -128,11 +128,11 @@ class SmartGazeboDownloader:
                 time.sleep(0.5)  # Rate limiting
                     
             except Exception as e:
-                print(f"[ERRO] Erro na página {page}: {e}")
+                print(f"[ERRO] Erro na pagina {page}: {e}")
                 break
         
         models_list = sorted(list(models))[:self.max_models]
-        print(f"\n[OK] {len(models_list)} modelos únicos obtidos via scraping")
+        print(f"\n[OK] {len(models_list)} modelos unicos obtidos via scraping")
         return models_list
     
     def download_model(self, model_name: str) -> bool:
@@ -242,7 +242,7 @@ class SmartGazeboDownloader:
         
         # Resumo
         print("\n" + "=" * 60)
-        print("[RESUMO] Download concluído!")
+        print("[RESUMO] Download concluido!")
         print("=" * 60)
         print(f"Baixados: {self.downloaded}/{len(models)}")
         print(f"Falhas: {self.failed}")
@@ -264,8 +264,8 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description="Download inteligente de modelos Gazebo")
-    parser.add_argument('--max-objects', type=int, default=200, help='Número de modelos')
-    parser.add_argument('--output', default='data/raw/gazebo_dataset', help='Diretório de saída')
+    parser.add_argument('--max-objects', type=int, default=200, help='Numero de modelos')
+    parser.add_argument('--output', default='data/raw/gazebo_dataset', help='Diretorio de saida')
     
     args = parser.parse_args()
     

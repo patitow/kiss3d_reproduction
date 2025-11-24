@@ -47,7 +47,7 @@ class MeshRefiner:
             Malha 3D refinada (trimesh.Trimesh)
         """
         # TODO: Implementar refinamento com ControlNet-Tile e ControlNet-Normal
-        raise NotImplementedError("Método refine() será implementado na Etapa 3")
+        raise NotImplementedError("Metodo refine() sera implementado na Etapa 3")
     
     def refine_with_llm_text(self, mesh: trimesh.Trimesh,
                             initial_text: str,
@@ -66,6 +66,6 @@ class MeshRefiner:
             Malha 3D refinada
         """
         # TODO: Integrar com módulo LLM para gerar texto detalhado
-        raise NotImplementedError("Método refine_with_llm_text() será implementado na Etapa 4")
+        raise NotImplementedError("Metodo refine_with_llm_text() sera implementado na Etapa 4")
 
 

@@ -50,7 +50,7 @@ class LRMReconstructor:
                 self.config = OmegaConf.load(self.config_path)
             else:
                 # Tentar usar config padrão
-                print("[LRM] Usando config padrão")
+                print("[LRM] Usando config padrao")
                 # TODO: Criar config padrão ou buscar do HuggingFace
                 self.config = None
             
@@ -80,10 +80,10 @@ class LRMReconstructor:
                     print("[LRM] Modelo carregado com sucesso")
                     
                 except ImportError:
-                    print("[LRM] Módulo LRM não encontrado - usando placeholder")
+                    print("[LRM] Modulo LRM nao encontrado - usando placeholder")
                     self.model = None
             else:
-                print("[LRM] Config não disponível - usando placeholder")
+                print("[LRM] Config nao disponivel - usando placeholder")
                 self.model = None
                 
         except Exception as e:
@@ -112,7 +112,7 @@ class LRMReconstructor:
         print("[LRM] Reconstruindo mesh a partir de multiview...")
         
         if self.model is None:
-            print("[LRM] Modelo não disponível - usando placeholder")
+            print("[LRM] Modelo nao disponivel - usando placeholder")
             # Retornar mesh placeholder simples
             return self._create_placeholder_mesh()
         
@@ -148,7 +148,7 @@ class LRMReconstructor:
                     fov=30
                 ).to(self.device)
             except ImportError:
-                print("[LRM] Módulo de câmera não encontrado - usando placeholder")
+                print("[LRM] Modulo de camera nao encontrado - usando placeholder")
                 return self._create_placeholder_mesh()
             
             # Forward pass do modelo
@@ -179,7 +179,7 @@ class LRMReconstructor:
             rgb_views = rgb_multi_view.squeeze(0).cpu()
             albedo_views = rgb_views  # Placeholder
             
-            print(f"[LRM] Mesh reconstruído: {len(vertices)} vertices, {len(faces)} faces")
+            print(f"[LRM] Mesh reconstruido: {len(vertices)} vertices, {len(faces)} faces")
             
             return (
                 torch.from_numpy(vertices),
@@ -190,7 +190,7 @@ class LRMReconstructor:
             )
             
         except Exception as e:
-            print(f"[LRM] Erro na reconstrução: {e}")
+            print(f"[LRM] Erro na reconstrucao: {e}")
             import traceback
             traceback.print_exc()
             return self._create_placeholder_mesh()

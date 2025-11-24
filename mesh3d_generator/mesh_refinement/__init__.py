@@ -1,4 +1,4 @@
-"""Módulo para refinamento de malhas 3D"""
+"""Modulo para refinamento de malhas 3D"""
 
 from mesh3d_generator.mesh_refinement.refiner import MeshRefiner
 

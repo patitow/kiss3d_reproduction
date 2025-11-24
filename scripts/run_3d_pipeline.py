@@ -95,7 +95,7 @@ class ComfyUIPipeline:
         return response.content
     
     def wait_for_completion(self, prompt_id: str, timeout: int = 300) -> bool:
-        """Aguarda conclusão do prompt"""
+        """Aguarda conclusao do prompt"""
         start_time = time.time()
         while time.time() - start_time < timeout:
             history = requests.get(f"{self.comfyui_url}/history/{prompt_id}").json()
@@ -136,7 +136,7 @@ class ComfyUIPipeline:
     
     def generate_mesh(self, image_path: str, normal_map_path: Optional[str], 
                      description: str, workflow_path: str) -> Optional[str]:
-        """Gera mesh 3D a partir de imagem, normal map e descrição"""
+        """Gera mesh 3D a partir de imagem, normal map e descricao"""
         print(f"  [2/4] Gerando mesh 3D...")
         
         # Upload imagem
@@ -167,14 +167,14 @@ class ComfyUIPipeline:
 
 
 class LLMDescriptionGenerator:
-    """Gera descrições detalhadas usando LLM"""
+    """Gera descricoes detalhadas usando LLM"""
     
     def __init__(self):
         if not OLLAMA_AVAILABLE:
             print("[AVISO] Ollama nao disponivel. Usando descricoes genericas.")
     
     def generate_description(self, image_path: str) -> str:
-        """Gera descrição detalhada da imagem"""
+        """Gera descricao detalhada da imagem"""
         if not OLLAMA_AVAILABLE:
             # Descrição genérica baseada no nome do arquivo
             name = Path(image_path).stem
@@ -212,8 +212,8 @@ class MeshComparator:
     """Compara modelos 3D gerados com originais"""
     
     def compare_meshes(self, original_path: str, generated_path: str) -> Dict:
-        """Compara dois modelos 3D e retorna métricas abrangentes"""
-        print(f"  [3/4] Comparando modelos com métricas avançadas...")
+        """Compara dois modelos 3D e retorna metricas abrangentes"""
+        print(f"  [3/4] Comparando modelos com metricas avancadas...")
         
         try:
             # Carregar meshes de forma robusta
@@ -224,10 +224,10 @@ class MeshComparator:
             try:
                 from mesh3d_generator.validation.mesh_metrics import compare_meshes_comprehensive
                 metrics = compare_meshes_comprehensive(original, generated, num_samples=10000)
-                print(f"  [OK] Métricas avançadas calculadas")
+                print(f"  [OK] Metricas avancadas calculadas")
             except ImportError:
                 # Fallback para métricas básicas
-                print(f"  [AVISO] Módulo de validação não disponível, usando métricas básicas")
+                print(f"  [AVISO] Modulo de validacao nao disponivel, usando metricas basicas")
                 metrics = {
                     'original_vertices': len(original.vertices),
                     'generated_vertices': len(generated.vertices),
@@ -502,8 +502,8 @@ Similaridade de Volume: {metrics.get('volume_similarity', 0):.2% if metrics.get(
     
     def create_rotation_gif(self, original_path: str, generated_path: str, 
                             output_path: str, frames: int = 60, input_image_path: Optional[str] = None):
-        """Cria GIF com ambos modelos girando lado a lado (comparação), incluindo imagem de input"""
-        print(f"  [5/5] Criando GIF rotativo de comparação (original vs gerado)...")
+        """Cria GIF com ambos modelos girando lado a lado (comparacao), incluindo imagem de input"""
+        print(f"  [5/5] Criando GIF rotativo de comparacao (original vs gerado)...")
         
         try:
             # Carregar meshes de forma robusta
@@ -683,7 +683,7 @@ def load_mesh_properly(mesh_path: Path, use_largest_component: bool = True,
                 mesh = trimesh.util.concatenate(meshes)
                 print(f"  [INFO] Scene convertida: {len(meshes)} geometrias concatenadas")
             else:
-                raise ValueError("Scene não contém meshes válidos")
+                raise ValueError("Scene nao contem meshes validos")
         else:
             raise ValueError("Scene vazia")
     else:
@@ -710,7 +710,7 @@ def load_mesh_properly(mesh_path: Path, use_largest_component: bool = True,
     
     # Garantir que é Trimesh
     if not isinstance(mesh, trimesh.Trimesh):
-        raise ValueError(f"Tipo inesperado após processamento: {type(mesh)}")
+        raise ValueError(f"Tipo inesperado apos processamento: {type(mesh)}")
     
     print(f"  [INFO] Mesh inicial: {len(mesh.vertices)} vertices, {len(mesh.faces)} faces")
     
@@ -738,7 +738,7 @@ def load_mesh_properly(mesh_path: Path, use_largest_component: bool = True,
     # Remover faces duplicadas e degeneradas - merge_tex=True preserva texturas
     mesh.merge_vertices(merge_tex=True, merge_norm=True)
     
-    print(f"  [INFO] Após limpeza: {len(mesh.vertices)} vertices, {len(mesh.faces)} faces")
+    print(f"  [INFO] Apos limpeza: {len(mesh.vertices)} vertices, {len(mesh.faces)} faces")
     
     # Se mesh tem múltiplos componentes, usar apenas o(s) maior(es)
     if use_largest_component:
@@ -775,22 +775,22 @@ def load_mesh_properly(mesh_path: Path, use_largest_component: bool = True,
     # Tentar tornar watertight se solicitado
     if make_watertight:
         if not mesh.is_watertight:
-            print(f"  [INFO] Mesh não é watertight. Tentando corrigir...")
+            print(f"  [INFO] Mesh nao e watertight. Tentando corrigir...")
             try:
                 # Usar fill_holes para tentar fechar buracos
                 mesh.fill_holes()
                 if mesh.is_watertight:
-                    print(f"  [OK] Mesh agora é watertight após fill_holes")
+                    print(f"  [OK] Mesh agora e watertight apos fill_holes")
                 else:
-                    print(f"  [AVISO] Mesh ainda não é watertight após fill_holes")
+                    print(f"  [AVISO] Mesh ainda nao e watertight apos fill_holes")
             except Exception as e:
-                print(f"  [AVISO] Não foi possível tornar mesh watertight: {e}")
+                print(f"  [AVISO] Nao foi possivel tornar mesh watertight: {e}")
         else:
-            print(f"  [OK] Mesh já é watertight")
+            print(f"  [OK] Mesh ja e watertight")
     
     # Verificar se mesh é válido
     if len(mesh.vertices) == 0 or len(mesh.faces) == 0:
-        raise ValueError("Mesh vazio após limpeza")
+        raise ValueError("Mesh vazio apos limpeza")
     
     # Informações finais
     print(f"  [OK] Mesh final: {len(mesh.vertices)} vertices, {len(mesh.faces)} faces")
@@ -932,7 +932,7 @@ def process_single_object(model_name: str, dataset_path: Path, output_path: Path
                           llm_generator: LLMDescriptionGenerator,
                           comparator: MeshComparator,
                           workflow_path: str):
-    """Processa um único objeto através do pipeline completo"""
+    """Processa um unico objeto atraves do pipeline completo"""
     
     print(f"\n{'='*60}")
     print(f"Processando: {model_name}")
@@ -1013,7 +1013,7 @@ def process_single_object(model_name: str, dataset_path: Path, output_path: Path
     print(f"[OK] Mesh original encontrado: {original_mesh.name}")
     
     # 6. GERAR MESH VIA PIPELINE PRÓPRIO (SEGUNDO ABORDAGEM KISS3DGEN)
-    print(f"  [INFO] Tentando usar pipeline próprio de geração 3D...")
+    print(f"  [INFO] Tentando usar pipeline proprio de geracao 3D...")
     
     pipeline_available = False
     generated_mesh_path = None
@@ -1023,7 +1023,7 @@ def process_single_object(model_name: str, dataset_path: Path, output_path: Path
         from mesh3d_generator.pipeline.image_to_3d_pipeline import ImageTo3DPipeline
         
         # Inicializar pipeline próprio
-        print(f"  [INFO] Inicializando pipeline próprio...")
+        print(f"  [INFO] Inicializando pipeline proprio...")
         pipeline = ImageTo3DPipeline(
             device="cuda:0",  # RTX 3060 12GB
             zero123_model=None,  # Será carregado sob demanda
@@ -1048,22 +1048,22 @@ def process_single_object(model_name: str, dataset_path: Path, output_path: Path
         )
         
         if generated_mesh_path and Path(generated_mesh_path).exists():
-            print(f"  [OK] Modelo 3D gerado via pipeline próprio: {generated_mesh_path}")
+            print(f"  [OK] Modelo 3D gerado via pipeline proprio: {generated_mesh_path}")
             print(f"  [OK] Bundle image: {bundle_image_path}")
             
             # Carregar mesh gerado para validação
             generated_mesh = load_mesh_properly(Path(generated_mesh_path), use_largest_component=True, make_watertight=False)
             print(f"  [OK] Mesh gerado carregado: {len(generated_mesh.vertices)} vertices, {len(generated_mesh.faces)} faces")
         else:
-            print(f"  [AVISO] Pipeline próprio ainda não implementado completamente")
+            print(f"  [AVISO] Pipeline proprio ainda nao implementado completamente")
             print(f"  [AVISO] Usando fallback (placeholder)")
             pipeline_available = False
             
     except ImportError as e:
-        print(f"  [AVISO] Pipeline próprio não disponível: {e}")
+        print(f"  [AVISO] Pipeline proprio nao disponivel: {e}")
         print(f"  [AVISO] Usando fallback (placeholder)")
     except Exception as e:
-        print(f"  [ERRO] Falha ao usar pipeline próprio: {e}")
+        print(f"  [ERRO] Falha ao usar pipeline proprio: {e}")
         import traceback
         traceback.print_exc()
         print(f"  [AVISO] Usando fallback (placeholder)")
@@ -1077,7 +1077,7 @@ def process_single_object(model_name: str, dataset_path: Path, output_path: Path
     
     # FALLBACK: Se pipeline próprio não estiver disponível, usar placeholder
     if not pipeline_available or generated_mesh_path is None:
-        print(f"  [AVISO] Pipeline próprio de geração 3D ainda nao implementado completamente")
+        print(f"  [AVISO] Pipeline proprio de geracao 3D ainda nao implementado completamente")
         print(f"  [AVISO] Usando mesh placeholder baseado no original (NAO E GERACAO REAL)")
         print(f"  [AVISO] Implementar: Zero123, Flux+ControlNet, LRM+ISOMER")
         
@@ -1124,7 +1124,7 @@ def process_single_object(model_name: str, dataset_path: Path, output_path: Path
             print(f"  [INFO] Mesh placeholder criado: {len(generated_mesh.vertices)} vertices, {len(generated_mesh.faces)} faces")
             
         except Exception as e:
-            print(f"  [AVISO] Criacao de mesh placeholder falhou ({e}), usando cópia simplificada")
+            print(f"  [AVISO] Criacao de mesh placeholder falhou ({e}), usando copia simplificada")
             import traceback
             traceback.print_exc()
             # Fallback: usar cópia do original com leve deformação
@@ -1174,15 +1174,15 @@ def process_single_object(model_name: str, dataset_path: Path, output_path: Path
             try:
                 generated_mesh.fill_holes()
                 if generated_mesh.is_watertight:
-                    print(f"  [OK] Mesh agora é watertight")
+                    print(f"  [OK] Mesh agora e watertight")
                     # Re-exportar mesh watertight
                     generated_mesh.export(str(generated_mesh_path))
                 else:
-                    print(f"  [AVISO] Não foi possível tornar mesh watertight")
+                    print(f"  [AVISO] Nao foi possivel tornar mesh watertight")
             except Exception as e:
                 print(f"  [AVISO] Erro ao tentar tornar watertight: {e}")
     except ImportError:
-        print(f"  [AVISO] Módulo de validação não disponível")
+        print(f"  [AVISO] Modulo de validacao nao disponivel")
         
         # Comparar modelos
         print(f"  [INFO] Comparando modelos...")
@@ -1224,22 +1224,22 @@ def process_single_object(model_name: str, dataset_path: Path, output_path: Path
                     # Aplicar textura ao mesh gerado temporariamente
                     generated_for_glb.visual.material = original_for_glb.visual.material
                     texture_applied = True
-                    print(f"  [INFO] Textura de imagem aplicada do original ao mesh gerado (temporário)")
+                    print(f"  [INFO] Textura de imagem aplicada do original ao mesh gerado (temporario)")
                 elif hasattr(original_for_glb.visual.material, 'main_color'):
                     # Aplicar cor do material
                     generated_for_glb.visual.material = original_for_glb.visual.material
                     texture_applied = True
-                    print(f"  [INFO] Cor de material aplicada do original ao mesh gerado (temporário)")
+                    print(f"  [INFO] Cor de material aplicada do original ao mesh gerado (temporario)")
             
             if not texture_applied and hasattr(original_for_glb.visual, 'vertex_colors') and original_for_glb.visual.vertex_colors is not None:
                 # Aplicar vertex colors se disponíveis
                 if len(generated_for_glb.vertices) == len(original_for_glb.vertices):
                     generated_for_glb.visual.vertex_colors = original_for_glb.visual.vertex_colors
                     texture_applied = True
-                    print(f"  [INFO] Vertex colors aplicados do original ao mesh gerado (temporário)")
+                    print(f"  [INFO] Vertex colors aplicados do original ao mesh gerado (temporario)")
             
             if not texture_applied:
-                print(f"  [AVISO] Nenhuma textura disponível para aplicar")
+                print(f"  [AVISO] Nenhuma textura disponivel para aplicar")
             
             # Exportar mesh gerado para GLB
             generated_glb_path = model_output_dir / f"generated_{object_name_safe}.glb"

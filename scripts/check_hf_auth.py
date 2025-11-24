@@ -3,10 +3,10 @@ from huggingface_hub import whoami
 
 try:
     user = whoami()
-    print(f"✅ Autenticado como: {user.get('name', 'Unknown')}")
+    print(f"[OK] Autenticado como: {user.get('name', 'Unknown')}")
     print(f"   Email: {user.get('email', 'Unknown')}")
 except Exception:
-    print("❌ Não autenticado no HuggingFace")
+    print("[ERRO] Nao autenticado no HuggingFace")
     print("\n💡 Para autenticar:")
     print("   1. Acesse: https://huggingface.co/settings/tokens")
     print("   2. Crie um token (read)")

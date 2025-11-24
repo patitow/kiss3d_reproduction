@@ -40,7 +40,7 @@ class ImageTo3DPipeline:
         """
         # Verificar se CUDA está disponível
         if device.startswith("cuda") and not torch.cuda.is_available():
-            print(f"[PIPELINE] AVISO: CUDA não disponível, usando CPU")
+            print(f"[PIPELINE] AVISO: CUDA nao disponivel, usando CPU")
             device = "cpu"
         
         self.device = device
@@ -57,7 +57,7 @@ class ImageTo3DPipeline:
         
         print(f"[PIPELINE] Inicializado com device: {device}")
         if device == "cpu":
-            print(f"[PIPELINE] AVISO: Processamento em CPU será muito lento para modelos grandes")
+            print(f"[PIPELINE] AVISO: Processamento em CPU sera muito lento para modelos grandes")
     
     def generate_reference_3d_bundle_image(self, 
                                          input_image: Image.Image,
@@ -85,6 +85,9 @@ class ImageTo3DPipeline:
         try:
             from mesh3d_generator.pipeline.multiview_generator import Zero123MultiviewGenerator
             
+            # Limpar cache CUDA antes de carregar modelos
+            torch.cuda.empty_cache()
+            
             # 1. Gerar multiview com Zero123++
             print("  [3.1] Gerando multiview com Zero123++...")
             multiview_gen = Zero123MultiviewGenerator(
@@ -92,6 +95,9 @@ class ImageTo3DPipeline:
                 device=self.device,
                 dtype=torch.float16
             )
+            
+            # Limpar cache após carregar
+            torch.cuda.empty_cache()
             
             # Gerar 4 views: 270°, 0°, 90°, 180° com elevação 5°
             multiview_image = multiview_gen.generate_multiview(
@@ -108,6 +114,7 @@ class ImageTo3DPipeline:
             print("  [3.2] Reconstruindo mesh inicial com LRM...")
             try:
                 from mesh3d_generator.pipeline.lrm_reconstructor import LRMReconstructor
+                import torchvision.transforms as transforms  # Garantir que transforms está disponível
                 
                 lrm = LRMReconstructor(device=self.device)
                 vertices, faces, normals, rgb_views, albedo_views = lrm.reconstruct_from_multiview(
@@ -117,10 +124,10 @@ class ImageTo3DPipeline:
                     render_elevations=[5, 5, 5, 5]
                 )
                 
-                print(f"  [OK] Mesh reconstruído: {len(vertices)} vertices, {len(faces)} faces")
+                print(f"  [OK] Mesh reconstruido: {len(vertices)} vertices, {len(faces)} faces")
                 
             except Exception as e:
-                print(f"  [AVISO] LRM não disponível: {e}")
+                print(f"  [AVISO] LRM nao disponivel: {e}")
                 # Fallback: usar multiview RGB diretamente
                 import torchvision.transforms.functional as TF
                 bundle_tensor = TF.to_tensor(multiview_image).float()
@@ -154,7 +161,7 @@ class ImageTo3DPipeline:
                     print("  [AVISO] Usando normal maps placeholder")
                     
             except Exception as e:
-                print(f"  [AVISO] Normal renderer não disponível: {e}")
+                print(f"  [AVISO] Normal renderer nao disponivel: {e}")
                 # Fallback: criar normal maps placeholder
                 normal_views = torch.ones_like(rgb_views) * 0.5
             
@@ -227,12 +234,12 @@ class ImageTo3DPipeline:
                 torchvision.utils.save_image(bundle_image, save_path)
                 print(f"  [OK] Bundle image salvo: {save_path}")
             except Exception as e:
-                print(f"  [AVISO] Não foi possível salvar bundle image: {e}")
+                print(f"  [AVISO] Nao foi possivel salvar bundle image: {e}")
             
             return bundle_image, save_path
             
         except ImportError as e:
-            print(f"  [ERRO] Módulo não encontrado: {e}")
+            print(f"  [ERRO] Modulo nao encontrado: {e}")
             print(f"  [AVISO] Instale: pip install diffusers transformers")
             # Fallback: criar bundle image vazio
             bundle_image = torch.zeros((3, 1024, 2048), dtype=torch.float32)
@@ -277,17 +284,23 @@ class ImageTo3DPipeline:
         try:
             from mesh3d_generator.pipeline.flux_controlnet_generator import FluxControlNetGenerator
             
+            # Limpar cache CUDA antes de carregar Flux
+            torch.cuda.empty_cache()
+            
             flux_gen = FluxControlNetGenerator(
                 flux_model_id="black-forest-labs/FLUX.1-dev",
                 controlnet_model_id="InstantX/FLUX.1-dev-Controlnet-Union",
                 redux_model_id="black-forest-labs/FLUX.1-Redux-dev" if enable_redux else None,
                 device=self.device,
-                dtype=torch.bfloat16
+                dtype=torch.float16  # Usar float16 em vez de bfloat16 para compatibilidade
             )
             
             # Carregar modelos (sob demanda)
             if flux_gen.flux_pipeline is None:
                 flux_gen._load_models()
+            
+            # Limpar cache após carregar
+            torch.cuda.empty_cache()
             
             # Gerar bundle image refinado
             bundle_image, save_path = flux_gen.generate_bundle_image(
@@ -305,7 +318,7 @@ class ImageTo3DPipeline:
             return bundle_image, save_path
             
         except Exception as e:
-            print(f"  [AVISO] Flux + ControlNet não disponível: {e}")
+            print(f"  [AVISO] Flux + ControlNet nao disponivel: {e}")
             print("  [AVISO] Usando reference bundle image")
             # Fallback: usar reference bundle image
             bundle_image = reference_bundle_image.clone()
@@ -357,6 +370,7 @@ class ImageTo3DPipeline:
             print("  [5.2] Reconstruindo mesh inicial com LRM...")
             try:
                 from mesh3d_generator.pipeline.lrm_reconstructor import LRMReconstructor
+                import torchvision.transforms as transforms  # Garantir que transforms está disponível
                 
                 lrm = LRMReconstructor(device=self.device)
                 vertices, faces, _, _, _ = lrm.reconstruct_from_multiview(
@@ -370,7 +384,7 @@ class ImageTo3DPipeline:
                 print(f"  [OK] Mesh inicial: {len(vertices)} vertices, {len(faces)} faces")
                 
             except Exception as e:
-                print(f"  [AVISO] LRM não disponível: {e}")
+                print(f"  [AVISO] LRM nao disponivel: {e}")
                 # Fallback: criar mesh simples
                 import trimesh
                 sphere = trimesh.creation.icosphere(subdivisions=2, radius=1.0)
@@ -399,7 +413,7 @@ class ImageTo3DPipeline:
                 print(f"  [OK] Mesh refinado: {len(vertices)} vertices, {len(faces)} faces")
                 
             except Exception as e:
-                print(f"  [AVISO] ISOMER não disponível: {e}")
+                print(f"  [AVISO] ISOMER nao disponivel: {e}")
                 # Continuar com mesh inicial
             
             # 4. Projetar texturas e exportar
@@ -426,7 +440,7 @@ class ImageTo3DPipeline:
                 return mesh_path
                 
             except Exception as e:
-                print(f"  [AVISO] Projeção de texturas não disponível: {e}")
+                print(f"  [AVISO] Projecao de texturas nao disponivel: {e}")
                 # Fallback: salvar mesh simples
                 import trimesh
                 mesh = trimesh.Trimesh(
@@ -437,7 +451,7 @@ class ImageTo3DPipeline:
                 return output_path
             
         except Exception as e:
-            print(f"  [ERRO] Falha na reconstrução: {e}")
+            print(f"  [ERRO] Falha na reconstrucao: {e}")
             import traceback
             traceback.print_exc()
             return ""
@@ -458,7 +472,7 @@ class ImageTo3DPipeline:
             grid = torchvision.utils.make_grid(views, nrow=4, padding=0)
             return grid
         else:
-            raise ValueError(f"Formato de views inválido: {views.shape}")
+            raise ValueError(f"Formato de views invalido: {views.shape}")
     
     def _views_to_image(self, views: torch.Tensor) -> Image.Image:
         """Converte tensor de views para PIL Image"""
@@ -494,7 +508,7 @@ class ImageTo3DPipeline:
         Returns:
             Tuple[generated_mesh_path, bundle_image_path, caption]
         """
-        print(f"\n[PIPELINE] Iniciando geração 3D para: {object_name}")
+        print(f"\n[PIPELINE] Iniciando geracao 3D para: {object_name}")
         
         # Carregar imagem
         input_image = Image.open(input_image_path)

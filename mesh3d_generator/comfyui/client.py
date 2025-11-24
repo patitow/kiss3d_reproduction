@@ -25,7 +25,7 @@ class ComfyUIClient:
         self._check_connection()
     
     def _check_connection(self) -> bool:
-        """Verifica se o ComfyUI está rodando"""
+        """Verifica se o ComfyUI esta rodando"""
         try:
             response = requests.get(f"{self.comfyui_url}/system_stats", timeout=5)
             if response.status_code == 200:

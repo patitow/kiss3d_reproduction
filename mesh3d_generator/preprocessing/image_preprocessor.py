@@ -22,7 +22,7 @@ except ImportError:
 _rembg_session = None
 
 def get_rembg_session():
-    """Obtém ou cria sessão rembg global"""
+    """Obtem ou cria sessao rembg global"""
     global _rembg_session
     if _rembg_session is None and REMBG_AVAILABLE:
         _rembg_session = rembg.new_session("isnet-general-use")

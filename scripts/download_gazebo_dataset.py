@@ -26,7 +26,7 @@ try:
     HAS_BS4 = True
 except ImportError:
     HAS_BS4 = False
-    print("[AVISO] beautifulsoup4 não instalado. Instale com: pip install beautifulsoup4")
+    print("[AVISO] beautifulsoup4 nao instalado. Instale com: pip install beautifulsoup4")
 
 
 class GazeboDatasetDownloader:
@@ -90,7 +90,7 @@ class GazeboDatasetDownloader:
             if response.status_code == 200:
                 return response.json()
             else:
-                print(f"[AVISO] API retornou status {response.status_code}, tentando método alternativo...")
+                print(f"[AVISO] API retornou status {response.status_code}, tentando metodo alternativo...")
                 return None
                 
         except Exception as e:
@@ -107,11 +107,11 @@ class GazeboDatasetDownloader:
         return self._get_model_list_scraping()
     
     def _get_model_list_scraping(self) -> List[str]:
-        """Método de scraping da página web do Gazebo."""
+        """Metodo de scraping da pagina web do Gazebo."""
         models = []
         page = 1
         
-        print(f"[INFO] Buscando modelos do GoogleResearch na página do Gazebo...")
+        print(f"[INFO] Buscando modelos do GoogleResearch na pagina do Gazebo...")
         
         while len(models) < self.max_objects:
             try:
@@ -121,13 +121,13 @@ class GazeboDatasetDownloader:
                 response = self.session.get(search_url, timeout=30)
                 
                 if response.status_code != 200:
-                    print(f"[AVISO] URL direta retornou {response.status_code}, tentando com parâmetros...")
+                    print(f"[AVISO] URL direta retornou {response.status_code}, tentando com parametros...")
                     # Tentar com parâmetros GET
                     search_url = f"{self.BASE_URL}/search"
                     params = {'q': self.GOOGLE_RESEARCH_OWNER}
                     response = self.session.get(search_url, params=params, timeout=30)
                     if response.status_code != 200:
-                        print(f"[ERRO] Erro ao acessar página: {response.status_code}")
+                        print(f"[ERRO] Erro ao acessar pagina: {response.status_code}")
                         break
                 
                 content = response.text
@@ -160,7 +160,7 @@ class GazeboDatasetDownloader:
                             break
                 
                 if not found_models:
-                    print(f"[INFO] Nenhum modelo encontrado. Tentando método alternativo...")
+                    print(f"[INFO] Nenhum modelo encontrado. Tentando metodo alternativo...")
                     # Tentar acessar diretamente a página do owner
                     owner_url = f"{self.BASE_URL}/{self.GOOGLE_RESEARCH_OWNER}/models"
                     owner_response = self.session.get(owner_url, timeout=30)
@@ -177,7 +177,7 @@ class GazeboDatasetDownloader:
                                     break
                     break
                 
-                print(f"[INFO] Encontrados {len(models)} modelos únicos até agora...")
+                print(f"[INFO] Encontrados {len(models)} modelos unicos ate agora...")
                 
                 # Se encontrou modelos mas não atingiu o limite, tentar próxima página
                 if len(models) < self.max_objects and found_models:
@@ -247,7 +247,7 @@ class GazeboDatasetDownloader:
             # 1. Obter informações do modelo
             model_info = self.get_model_info(model_name)
             if not model_info:
-                print(f"[ERRO] Não foi possível obter informações do modelo {model_name}")
+                print(f"[ERRO] Nao foi possivel obter informacoes do modelo {model_name}")
                 return False
             
             # Salvar metadados
@@ -301,9 +301,9 @@ class GazeboDatasetDownloader:
                             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                                 zip_ref.extractall(model_dir)
                             zip_path.unlink()  # Remover ZIP após extrair
-                            print(f"[OK] Modelo {model_name} baixado e extraído")
+                            print(f"[OK] Modelo {model_name} baixado e extraido")
                         except zipfile.BadZipFile:
-                            print(f"[AVISO] Arquivo não é ZIP válido, mantendo como está")
+                            print(f"[AVISO] Arquivo nao e ZIP valido, mantendo como esta")
                         
                         # Procurar por imagens no diretório extraído
                         self._extract_images(model_dir, model_name)
@@ -349,7 +349,7 @@ class GazeboDatasetDownloader:
             return False
     
     def _extract_images(self, model_dir: Path, model_name: str):
-        """Extrai imagens do diretório do modelo."""
+        """Extrai imagens do diretorio do modelo."""
         image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp']
         
         for ext in image_extensions:
@@ -383,7 +383,7 @@ class GazeboDatasetDownloader:
         # Tentar usar a versão melhorada primeiro
         try:
             from scripts.download_gazebo_dataset_v2 import GazeboDatasetDownloaderV2
-            print("[INFO] Usando versão melhorada do downloader...")
+            print("[INFO] Usando versao melhorada do downloader...")
             downloader_v2 = GazeboDatasetDownloaderV2(
                 output_dir=str(self.output_dir),
                 max_objects=self.max_objects
@@ -391,14 +391,14 @@ class GazeboDatasetDownloader:
             downloader_v2.download_dataset()
             return
         except Exception as e:
-            print(f"[AVISO] Versão melhorada não disponível: {e}")
-            print("[INFO] Usando método padrão...")
+            print(f"[AVISO] Versao melhorada nao disponivel: {e}")
+            print("[INFO] Usando metodo padrao...")
         
         # Obter lista de modelos
         models = self.get_model_list_from_web()
         
         if not models:
-            print("[ERRO] Não foi possível obter lista de modelos")
+            print("[ERRO] Nao foi possivel obter lista de modelos")
             return
         
         print(f"[OK] Encontrados {len(models)} modelos para baixar")
@@ -421,7 +421,7 @@ class GazeboDatasetDownloader:
         
         # Resumo final
         print("\n" + "=" * 60)
-        print("[RESUMO] Download concluído!")
+        print("[RESUMO] Download concluido!")
         print("=" * 60)
         print(f"Baixados com sucesso: {self.downloaded_count}")
         print(f"Falhas: {self.failed_count}")
@@ -453,13 +453,13 @@ def main():
         '--output',
         type=str,
         default='data/raw/gazebo_dataset',
-        help='Diretório de saída (padrão: data/raw/gazebo_dataset)'
+        help='Diretorio de saida (padrao: data/raw/gazebo_dataset)'
     )
     parser.add_argument(
         '--max-objects',
         type=int,
         default=200,
-        help='Número máximo de objetos para baixar (padrão: 200)'
+        help='Numero maximo de objetos para baixar (padrao: 200)'
     )
     
     args = parser.parse_args()

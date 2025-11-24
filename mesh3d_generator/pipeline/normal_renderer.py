@@ -56,12 +56,12 @@ class NormalMapRenderer:
                 vertices, faces, azimuths, elevations, radius, render_size, fov
             )
         except ImportError as e:
-            print(f"[NORMAL_RENDERER] Pytorch3D não disponível - usando método simples")
-            print(f"[NORMAL_RENDERER] Nota: Pytorch3D é opcional. Para instalar, veja INSTALL_PYTORCH3D.md")
+            print(f"[NORMAL_RENDERER] Pytorch3D nao disponivel - usando metodo simples")
+            print(f"[NORMAL_RENDERER] Nota: Pytorch3D e opcional. Para instalar, veja INSTALL_PYTORCH3D.md")
             return self._render_simple(vertices, faces, azimuths, elevations, radius, render_size)
         except Exception as e:
-            print(f"[NORMAL_RENDERER] Erro no renderizador avançado: {e}")
-            print(f"[NORMAL_RENDERER] Usando método simples como fallback")
+            print(f"[NORMAL_RENDERER] Erro no renderizador avancado: {e}")
+            print(f"[NORMAL_RENDERER] Usando metodo simples como fallback")
             return self._render_simple(vertices, faces, azimuths, elevations, radius, render_size)
     
     def _render_with_pytorch3d(self,
@@ -87,7 +87,7 @@ class NormalMapRenderer:
                 )
                 from pytorch3d.structures import Meshes
             except ImportError:
-                raise ImportError("Pytorch3D não está instalado. É opcional - usando fallback.")
+                raise ImportError("Pytorch3D nao esta instalado. E opcional - usando fallback.")
             
             # Converter para device
             vertices = vertices.to(self.device).float()
@@ -113,10 +113,12 @@ class NormalMapRenderer:
                     at=((0, 0, 0),)
                 )
                 
+                # Calcular fov em radianos e usar aspect ratio
+                fov_rad = fov * np.pi / 180.0
                 cameras = PerspectiveCameras(
                     R=R,
                     T=T,
-                    fov=fov,
+                    focal_length=1.0 / np.tan(fov_rad / 2.0),  # Converter fov para focal_length
                     device=self.device
                 )
                 
@@ -155,7 +157,7 @@ class NormalMapRenderer:
             return normal_maps_tensor
             
         except ImportError:
-            raise ImportError("Pytorch3D não disponível")
+            raise ImportError("Pytorch3D nao disponivel")
     
     def _render_simple(self,
                       vertices: torch.Tensor,
@@ -164,8 +166,8 @@ class NormalMapRenderer:
                       elevations: List[float],
                       radius: float,
                       render_size: int) -> torch.Tensor:
-        """Renderiza usando método simples (placeholder)"""
-        print("[NORMAL_RENDERER] Usando renderização simples (placeholder)")
+        """Renderiza usando metodo simples (placeholder)"""
+        print("[NORMAL_RENDERER] Usando renderizacao simples (placeholder)")
         
         # Calcular normais dos vértices
         normals = self._compute_vertex_normals(vertices, faces)
@@ -185,7 +187,7 @@ class NormalMapRenderer:
         return torch.stack(normal_maps, dim=0)
     
     def _compute_vertex_normals(self, vertices: torch.Tensor, faces: torch.Tensor) -> torch.Tensor:
-        """Calcula normais dos vértices a partir das faces"""
+        """Calcula normais dos vertices a partir das faces"""
         # Converter para numpy para cálculo
         vertices_np = vertices.cpu().numpy()
         faces_np = faces.cpu().numpy()

@@ -38,14 +38,14 @@ class TextGenerator:
         self._check_ollama_connection()
         
     def _check_ollama_connection(self):
-        """Verifica se o Ollama está rodando."""
+        """Verifica se o Ollama esta rodando."""
         try:
             response = requests.get(f"{self.ollama_url}/api/tags", timeout=5)
             response.raise_for_status()
-            print(f"✅ Conectado ao Ollama em {self.ollama_url}")
+            print(f"[OK] Conectado ao Ollama em {self.ollama_url}")
         except requests.exceptions.RequestException as e:
-            print(f"⚠️  Aviso: Não foi possível conectar ao Ollama em {self.ollama_url}")
-            print(f"   Certifique-se de que o Ollama está rodando: ollama serve")
+            print(f"[AVISO]  Aviso: Nao foi possivel conectar ao Ollama em {self.ollama_url}")
+            print(f"   Certifique-se de que o Ollama esta rodando: ollama serve")
             print(f"   Erro: {e}")
     
     def _call_ollama(self, prompt: str, model: Optional[str] = None, images: Optional[list] = None) -> str:
@@ -100,7 +100,7 @@ class TextGenerator:
             image_path.save(buffer, format="PNG")
             return base64.b64encode(buffer.getvalue()).decode("utf-8")
         else:
-            raise ValueError(f"Tipo de imagem não suportado: {type(image_path)}")
+            raise ValueError(f"Tipo de imagem nao suportado: {type(image_path)}")
     
     def generate_detailed_description(self, initial_text: str, 
                                      include_geometry: bool = True,
@@ -120,11 +120,11 @@ class TextGenerator:
         """
         details = []
         if include_geometry:
-            details.append("geometria e forma dos objetos (dimensões, proporções, curvas, ângulos)")
+            details.append("geometria e forma dos objetos (dimensoes, proporcoes, curvas, angulos)")
         if include_materials:
-            details.append("materiais e texturas (tipo de superfície, acabamento, reflexos)")
+            details.append("materiais e texturas (tipo de superficie, acabamento, reflexos)")
         if include_lighting:
-            details.append("iluminação e sombras (direção da luz, intensidade, sombras projetadas)")
+            details.append("iluminacao e sombras (direcao da luz, intensidade, sombras projetadas)")
         
         details_str = ", ".join(details)
         

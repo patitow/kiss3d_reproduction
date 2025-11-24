@@ -14,7 +14,7 @@ import torch
 REQUIRED_MODELS = {
     "zero123": {
         "repo_id": "sudo-ai/zero123plus-v1.2",
-        "description": "Zero123++ para geração de multiview",
+        "description": "Zero123++ para geracao de multiview",
         "required": True
     },
     "flux": {
@@ -35,7 +35,7 @@ REQUIRED_MODELS = {
 }
 
 def check_model_downloaded(repo_id: str) -> bool:
-    """Verifica se um modelo está baixado"""
+    """Verifica se um modelo esta baixado"""
     cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
     model_dir_name = f"models--{repo_id.replace('/', '--')}"
     model_path = os.path.join(cache_dir, model_dir_name)
@@ -45,19 +45,19 @@ def download_model(repo_id: str, description: str, required: bool = True):
     """Baixa um modelo do HuggingFace"""
     print(f"\n{'='*60}")
     print(f"Modelo: {repo_id}")
-    print(f"Descrição: {description}")
+    print(f"Descricao: {description}")
     print(f"{'='*60}")
     
     if check_model_downloaded(repo_id):
-        print(f"✅ Modelo já está baixado!")
+        print(f"[OK] Modelo ja esta baixado!")
         return True
     
     if not required:
-        print(f"⚠️  Modelo opcional - pulando download")
+        print(f"[AVISO]  Modelo opcional - pulando download")
         return False
     
     print(f"📥 Baixando modelo...")
-    print(f"   Isso pode demorar vários minutos e requer espaço em disco...")
+    print(f"   Isso pode demorar varios minutos e requer espaco em disco...")
     
     try:
         # Baixar modelo completo
@@ -67,21 +67,21 @@ def download_model(repo_id: str, description: str, required: bool = True):
             local_dir_use_symlinks=False,  # Windows não suporta symlinks bem
             resume_download=True
         )
-        print(f"✅ Modelo baixado com sucesso!")
+        print(f"[OK] Modelo baixado com sucesso!")
         return True
     except Exception as e:
-        print(f"❌ Erro ao baixar modelo: {e}")
+        print(f"[ERRO] Erro ao baixar modelo: {e}")
         import traceback
         traceback.print_exc()
         return False
 
 def main():
-    """Baixa modelos necessários"""
+    """Baixa modelos necessarios"""
     print("="*60)
     print("DOWNLOAD DE MODELOS PARA PIPELINE 3D")
     print("="*60)
     
-    print(f"\n[INFO] CUDA disponível: {torch.cuda.is_available()}")
+    print(f"\n[INFO] CUDA disponivel: {torch.cuda.is_available()}")
     if torch.cuda.is_available():
         print(f"[INFO] GPU: {torch.cuda.get_device_name(0)}")
         print(f"[INFO] VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
@@ -96,12 +96,12 @@ def main():
         required = info["required"]
         
         if check_model_downloaded(repo_id):
-            print(f"\n✅ {name} já está baixado")
+            print(f"\n[OK] {name} ja esta baixado")
             results[name] = True
             continue
         
         if not required:
-            print(f"\n⚠️  {name} é opcional - pulando")
+            print(f"\n[AVISO]  {name} e opcional - pulando")
             results[name] = None
             continue
         
@@ -116,11 +116,11 @@ def main():
     
     for name, success in results.items():
         if success is True:
-            print(f"✅ {name}: Baixado")
+            print(f"[OK] {name}: Baixado")
         elif success is False:
-            print(f"❌ {name}: Falha no download")
+            print(f"[ERRO] {name}: Falha no download")
         else:
-            print(f"⚠️  {name}: Opcional (não baixado)")
+            print(f"[AVISO]  {name}: Opcional (nao baixado)")
     
     all_required = all(
         results.get(name) is True 
@@ -129,10 +129,10 @@ def main():
     )
     
     if all_required:
-        print(f"\n✅ Todos os modelos obrigatórios estão prontos!")
+        print(f"\n[OK] Todos os modelos obrigatorios estao prontos!")
         return True
     else:
-        print(f"\n⚠️  Alguns modelos obrigatórios não foram baixados")
+        print(f"\n[AVISO]  Alguns modelos obrigatorios nao foram baixados")
         return False
 
 if __name__ == "__main__":

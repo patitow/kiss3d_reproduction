@@ -169,7 +169,7 @@ class GazeboDatasetDownloaderV2:
         ]
     
     def get_models_from_fuel_api(self) -> List[str]:
-        """Obtém lista de modelos via API do Fuel com paginação."""
+        """Obtem lista de modelos via API do Fuel com paginacao."""
         models = []
         page = 1
         per_page = 100
@@ -203,7 +203,7 @@ class GazeboDatasetDownloaderV2:
                         break
                     
                     models.extend([m for m in page_models if m and m not in models])
-                    print(f"[INFO] Página {page}: {len(page_models)} modelos, total: {len(models)}")
+                    print(f"[INFO] Pagina {page}: {len(page_models)} modelos, total: {len(models)}")
                     
                     if len(page_models) < per_page or len(models) >= self.max_objects:
                         break
@@ -214,7 +214,7 @@ class GazeboDatasetDownloaderV2:
                     break
                     
             except Exception as e:
-                print(f"[AVISO] Erro na página {page}: {e}")
+                print(f"[AVISO] Erro na pagina {page}: {e}")
                 break
         
         if models:
@@ -223,14 +223,14 @@ class GazeboDatasetDownloaderV2:
         return models
     
     def get_model_list(self) -> List[str]:
-        """Obtém lista completa de modelos."""
+        """Obtem lista completa de modelos."""
         # Usar lista conhecida diretamente (já tem 200+ modelos)
         models_list = self.known_models[:self.max_objects]
         print(f"[OK] {len(models_list)} modelos da lista para baixar")
         return models_list
     
     def _scrape_models(self) -> List[str]:
-        """Scraping básico da página."""
+        """Scraping basico da pagina."""
         models = []
         try:
             # Acessar página do owner diretamente
@@ -248,7 +248,7 @@ class GazeboDatasetDownloaderV2:
         return models
     
     def _download_file_from_tree(self, model_name: str, file_path: str, model_dir: Path) -> bool:
-        """Baixa um arquivo individual da árvore de arquivos."""
+        """Baixa um arquivo individual da arvore de arquivos."""
         try:
             model_url_encoded = quote(model_name, safe='')
             file_url_encoded = quote(file_path.lstrip('/'), safe='')
@@ -274,7 +274,7 @@ class GazeboDatasetDownloaderV2:
         return False
     
     def _download_file_tree(self, model_name: str, file_tree: list, model_dir: Path) -> int:
-        """Baixa recursivamente todos os arquivos da árvore."""
+        """Baixa recursivamente todos os arquivos da arvore."""
         downloaded = 0
         
         def process_node(node):
@@ -435,7 +435,7 @@ class GazeboDatasetDownloaderV2:
                 except zipfile.BadZipFile:
                     # Não é ZIP, salvar como está
                     zip_path.rename(model_dir / f"{model_name}_raw.bin")
-                    print(f"[AVISO] Arquivo não é ZIP, salvo como raw para {model_name}")
+                    print(f"[AVISO] Arquivo nao e ZIP, salvo como raw para {model_name}")
             
             # 2. Fallback: baixar página e extrair informações
             page_url = f"{self.BASE_URL}/{self.GOOGLE_RESEARCH_OWNER}/models/{model_url_encoded}"
@@ -471,7 +471,7 @@ class GazeboDatasetDownloaderV2:
             return False
     
     def _extract_images(self, model_dir: Path, model_name: str):
-        """Extrai imagens do diretório do modelo."""
+        """Extrai imagens do diretorio do modelo."""
         image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp']
         
         for ext in image_extensions:
@@ -524,7 +524,7 @@ class GazeboDatasetDownloaderV2:
                 self._save_progress(models, i)
         
         print("\n" + "=" * 60)
-        print("[RESUMO] Download concluído!")
+        print("[RESUMO] Download concluido!")
         print("=" * 60)
         print(f"Baixados: {self.downloaded_count}")
         print(f"Falhas: {self.failed_count}")
@@ -548,8 +548,8 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description="Baixa dataset do Google Research do Gazebo")
-    parser.add_argument('--output', default='data/raw/gazebo_dataset', help='Diretório de saída')
-    parser.add_argument('--max-objects', type=int, default=200, help='Número máximo de objetos')
+    parser.add_argument('--output', default='data/raw/gazebo_dataset', help='Diretorio de saida')
+    parser.add_argument('--max-objects', type=int, default=200, help='Numero maximo de objetos')
     
     args = parser.parse_args()
     

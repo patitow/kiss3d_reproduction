@@ -1,4 +1,4 @@
-"""Módulo para geração de normal maps a partir de imagens"""
+"""Modulo para geracao de normal maps a partir de imagens"""
 
 from mesh3d_generator.normal_maps.generator import NormalMapGenerator
 
