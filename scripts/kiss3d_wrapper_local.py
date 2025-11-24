@@ -636,12 +636,14 @@ class kiss3d_wrapper(object):
         _empty_cuda_cache()
         
         # LRM reconstruction
+        # Habilitar export_texmap para ter texturas intermediárias
         with self.context():
             vertices, faces, lrm_multi_view_normals, lrm_multi_view_rgb, lrm_multi_view_albedo = lrm_reconstruct(
                 self.recon_model,
                 self.recon_model_config.infer_config,
                 rgb_multi_view.unsqueeze(0).to(recon_device),
                 name=self.uuid,
+                export_texmap=True,  # HABILITADO: exportar com texturas
                 input_camera_type="kiss3d",
                 render_azimuths=[270, 0, 90, 180],
                 render_elevations=[5, 5, 5, 5],
@@ -660,6 +662,13 @@ class kiss3d_wrapper(object):
             )
         
         # ISOMER reconstruction
+        # Parâmetros otimizados para melhor qualidade
+        stage1_steps = max(15, reconstruction_stage2_steps // 4)  # 25% dos steps do stage2, mínimo 15
+        # Aumentar stage2_steps se muito baixo para melhor qualidade
+        if reconstruction_stage2_steps < 40:
+            reconstruction_stage2_steps = max(40, reconstruction_stage2_steps)
+            logger.info(f"Aumentando stage2_steps para {reconstruction_stage2_steps} para melhor qualidade")
+        
         save_paths = [os.path.join(OUT_DIR, f"{self.uuid}.glb"), os.path.join(OUT_DIR, f"{self.uuid}.obj")]
         isomer_reconstruct(
             rgb_multi_view=rgb_multi_view,
@@ -669,8 +678,11 @@ class kiss3d_wrapper(object):
             faces=faces,
             save_paths=save_paths,
             radius=isomer_radius,
-            reconstruction_stage1_steps=0,
+            reconstruction_stage1_steps=stage1_steps,
             reconstruction_stage2_steps=reconstruction_stage2_steps,
+            # Parâmetros de qualidade melhorados
+            geo_weights=[1.0, 0.95, 1.0, 0.95],  # Pesos mais balanceados
+            color_weights=[1.0, 0.7, 1.0, 0.7],  # Melhor projeção de cores
         )
         _empty_cuda_cache()
 

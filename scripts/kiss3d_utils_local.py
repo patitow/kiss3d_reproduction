@@ -37,6 +37,9 @@ from models.lrm.utils.infer_util import remove_background, resize_foreground
 from models.ISOMER.reconstruction_func import reconstruction
 from models.ISOMER.projection_func import projection
 
+# Importar função original do ISOMER para monkey-patch
+from models.ISOMER.scripts.utils import save_py3dmesh_with_trimesh_fast as _original_save_py3dmesh
+
 from utils.tool import (
     NormalTransfer,
     get_render_cameras_frames,
@@ -306,9 +309,9 @@ def isomer_reconstruct(
     save_paths=None,
     azimuths=[0, 90, 180, 270],
     elevations=[5, 5, 5, 5],
-    geo_weights=[1, 0.9, 1, 0.9],
-    color_weights=[1, 0.5, 1, 0.5],
-    reconstruction_stage1_steps=10,
+    geo_weights=[1.0, 0.95, 1.0, 0.95],  # Valores padrão melhorados
+    color_weights=[1.0, 0.7, 1.0, 0.7],  # Valores padrão melhorados
+    reconstruction_stage1_steps=15,  # Aumentado de 10 para 15
     reconstruction_stage2_steps=50,
     radius=4.5,
 ):
@@ -362,27 +365,40 @@ def isomer_reconstruct(
         init_faces=faces,
         stage1_steps=reconstruction_stage1_steps,
         stage2_steps=reconstruction_stage2_steps,
-        start_edge_len_stage1=0.1,
-        end_edge_len_stage1=0.02,
-        start_edge_len_stage2=0.02,
-        end_edge_len_stage2=0.005,
+        # Parâmetros de qualidade melhorados para mesh mais detalhada
+        start_edge_len_stage1=0.08,  # Reduzido de 0.1 para mais detalhes
+        end_edge_len_stage1=0.015,   # Reduzido de 0.02 para mais detalhes
+        start_edge_len_stage2=0.015, # Reduzido de 0.02 para mais detalhes
+        end_edge_len_stage2=0.003,   # Reduzido de 0.005 para mais detalhes
     )
 
     multi_view_mask_proj = mask_fix(multi_view_mask, erode_dilate=-10, blur=5)
 
     logger.info("==> Runing ISOMER projection ...")
-    save_glb_addr = projection(
-        meshes,
-        masks=multi_view_mask_proj.to(device),
-        images=rgb_multi_view.to(device),
-        azimuths=to_tensor_(azimuths),
-        elevations=to_tensor_(elevations),
-        weights=to_tensor_(color_weights),
-        fov=30,
-        radius=radius,
-        save_dir=TMP_DIR,
-        save_addrs=save_paths,
+    
+    # Monkey-patch: substituir função de salvamento pela nossa versão melhorada
+    import models.ISOMER.scripts.utils as isomer_utils
+    original_save = isomer_utils.save_py3dmesh_with_trimesh_fast
+    isomer_utils.save_py3dmesh_with_trimesh_fast = lambda m, p, **kwargs: save_py3dmesh_with_trimesh_fast_local(
+        m, p, apply_sRGB_to_LinearRGB=True, use_uv_texture=True, texture_resolution=2048
     )
+    
+    try:
+        save_glb_addr = projection(
+            meshes,
+            masks=multi_view_mask_proj.to(device),
+            images=rgb_multi_view.to(device),
+            azimuths=to_tensor_(azimuths),
+            elevations=to_tensor_(elevations),
+            weights=to_tensor_(color_weights),
+            fov=30,
+            radius=radius,
+            save_dir=TMP_DIR,
+            save_addrs=save_paths,
+        )
+    finally:
+        # Restaurar função original
+        isomer_utils.save_py3dmesh_with_trimesh_fast = original_save
 
     logger.info(f"==> Save mesh to {save_paths} ...")
     print(f"ISMOER time: {time.time() - end:.2f}s")
@@ -427,3 +443,180 @@ def render_3d_bundle_image_from_mesh(mesh_path):
 
     return bundle_image
 
+
+# ============================================================================
+# FUNÇÕES COPIADAS E MELHORADAS DO KISS3DGen (NÃO MODIFICAR ORIGINAIS)
+# ============================================================================
+
+def srgb_to_linear(c_srgb):
+    """Convert sRGB to linear RGB."""
+    c_linear = np.where(c_srgb <= 0.04045, c_srgb / 12.92, ((c_srgb + 0.055) / 1.055) ** 2.4)
+    return c_linear.clip(0, 1.)
+
+
+def fix_vert_color_glb(mesh_path):
+    """Fix vertex color GLB file to have proper material."""
+    try:
+        from pygltflib import GLTF2, Material, PbrMetallicRoughness
+        obj1 = GLTF2().load(mesh_path)
+        if len(obj1.meshes) > 0 and len(obj1.meshes[0].primitives) > 0:
+            obj1.meshes[0].primitives[0].material = 0
+            obj1.materials.append(Material(
+                pbrMetallicRoughness=PbrMetallicRoughness(
+                    baseColorFactor=[1.0, 1.0, 1.0, 1.0],
+                    metallicFactor=0.0,
+                    roughnessFactor=1.0,
+                ),
+                emissiveFactor=[0.0, 0.0, 0.0],
+                doubleSided=True,
+            ))
+            obj1.save(mesh_path)
+    except Exception as e:
+        logger.warning(f"Failed to fix GLB material: {e}")
+
+
+def save_py3dmesh_with_trimesh_fast_local(
+    meshes, 
+    save_glb_path, 
+    apply_sRGB_to_LinearRGB=True,
+    use_uv_texture=True,
+    texture_resolution=2048
+):
+    """
+    Versão LOCAL melhorada de save_py3dmesh_with_trimesh_fast.
+    Converte vertex colors para UV textures quando possível para melhor qualidade.
+    
+    Args:
+        meshes: pytorch3d.structures.Meshes object
+        save_glb_path: caminho de saída
+        apply_sRGB_to_LinearRGB: converter sRGB para linear RGB
+        use_uv_texture: se True, tenta criar textura UV (melhor qualidade)
+        texture_resolution: resolução da textura se use_uv_texture=True
+    """
+    from pytorch3d.structures import Meshes
+    
+    # Converter de pytorch3d para numpy
+    vertices = meshes.verts_packed().cpu().float().numpy()
+    triangles = meshes.faces_packed().cpu().long().numpy()
+    np_color = meshes.textures.verts_features_packed().cpu().float().numpy()
+    
+    if save_glb_path.endswith(".glb"):
+        # Rotacionar 180 graus ao longo do eixo Y
+        vertices[:, [0, 2]] = -vertices[:, [0, 2]]
+
+    if apply_sRGB_to_LinearRGB:
+        np_color = srgb_to_linear(np_color)
+    
+    assert vertices.shape[0] == np_color.shape[0], f"Vertices ({vertices.shape[0]}) != Colors ({np_color.shape[0]})"
+    assert np_color.shape[1] == 3, f"Colors must be RGB, got shape {np_color.shape}"
+    assert 0 <= np_color.min() and np_color.max() <= 1, f"Colors out of range: min={np_color.min()}, max={np_color.max()}"
+    
+    # Clamp colors
+    np_color = np.clip(np_color, 0, 1)
+    
+    # Tentar criar textura UV se solicitado e for GLB
+    if use_uv_texture and save_glb_path.endswith(".glb"):
+        try:
+            # Criar mesh base
+            mesh = trimesh.Trimesh(vertices=vertices, faces=triangles, vertex_colors=np_color)
+            mesh.remove_unreferenced_vertices()
+            
+            # Tentar criar textura UV usando unwrapping do trimesh
+            # Isso cria uma textura real ao invés de apenas vertex colors
+            try:
+                # Gerar UV coordinates usando unwrapping
+                # O trimesh tem funcionalidade para isso, mas pode falhar em meshes complexas
+                # Por enquanto, vamos usar uma abordagem mais simples mas funcional
+                
+                # Criar textura a partir das cores dos vértices
+                # Usar projeção simples para criar UV mapping
+                texture_img, uv_coords = _create_texture_from_vertex_colors(
+                    vertices, triangles, np_color, texture_resolution
+                )
+                
+                # Criar material com textura
+                from trimesh.visual import TextureVisuals
+                from trimesh.visual.material import SimpleMaterial
+                
+                material = SimpleMaterial(image=texture_img)
+                visual = TextureVisuals(uv=uv_coords, material=material)
+                mesh.visual = visual
+                
+                logger.info(f"Exportando mesh com textura UV ({texture_resolution}x{texture_resolution})")
+                mesh.export(save_glb_path)
+                
+            except Exception as e:
+                logger.warning(f"Falha ao criar textura UV, usando vertex colors: {e}")
+                # Fallback para vertex colors
+                mesh = trimesh.Trimesh(vertices=vertices, faces=triangles, vertex_colors=np_color)
+                mesh.remove_unreferenced_vertices()
+                mesh.export(save_glb_path)
+                
+        except Exception as e:
+            logger.warning(f"Erro ao processar mesh com textura, usando método básico: {e}")
+            # Fallback completo
+            mesh = trimesh.Trimesh(vertices=vertices, faces=triangles, vertex_colors=np_color)
+            mesh.remove_unreferenced_vertices()
+            mesh.export(save_glb_path)
+    else:
+        # Usar vertex colors (comportamento original)
+        mesh = trimesh.Trimesh(vertices=vertices, faces=triangles, vertex_colors=np_color)
+        mesh.remove_unreferenced_vertices()
+        mesh.export(save_glb_path)
+    
+    # Fix material para GLB
+    if save_glb_path.endswith(".glb"):
+        fix_vert_color_glb(save_glb_path)
+
+
+def _create_texture_from_vertex_colors(vertices, faces, vertex_colors, resolution=2048):
+    """
+    Cria textura e UV coordinates a partir de vertex colors.
+    Usa projeção melhorada e interpolação para qualidade superior.
+    """
+    # Gerar UV coordinates usando projeção esférica melhorada
+    # Usa coordenadas esféricas para melhor distribuição
+    uv_coords = np.zeros((len(vertices), 2))
+    
+    # Calcular coordenadas esféricas
+    r = np.linalg.norm(vertices, axis=1)
+    theta = np.arctan2(vertices[:, 1], vertices[:, 0])  # Azimuth
+    phi = np.arccos(np.clip(vertices[:, 2] / (r + 1e-8), -1, 1))  # Elevation
+    
+    # Normalizar para [0, 1]
+    uv_coords[:, 0] = (theta + np.pi) / (2 * np.pi)  # Azimuth -> U
+    uv_coords[:, 1] = phi / np.pi  # Elevation -> V
+    
+    # Criar grid de UV
+    u_grid = np.linspace(0, 1, resolution)
+    v_grid = np.linspace(0, 1, resolution)
+    U, V = np.meshgrid(u_grid, v_grid)
+    
+    # Interpolar cores usando interpolação bilinear
+    from scipy.interpolate import griddata
+    
+    # Criar pontos de amostragem
+    uv_points = np.column_stack([U.ravel(), V.ravel()])
+    
+    # Interpolar cores nos pontos do grid
+    colors_interp = griddata(
+        uv_coords,
+        vertex_colors,
+        uv_points,
+        method='linear',
+        fill_value=np.mean(vertex_colors, axis=0)  # Preencher com média se fora do range
+    )
+    
+    # Reshape para imagem
+    texture = (np.clip(colors_interp, 0, 1) * 255).astype(np.uint8).reshape(resolution, resolution, 3)
+    
+    # Aplicar suavização para melhor qualidade
+    try:
+        from scipy.ndimage import gaussian_filter
+        texture = gaussian_filter(texture.astype(float), sigma=0.5).astype(np.uint8)
+    except:
+        pass
+    
+    texture_img = Image.fromarray(texture)
+    
+    return texture_img, uv_coords
