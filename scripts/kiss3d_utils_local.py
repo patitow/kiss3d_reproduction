@@ -47,6 +47,78 @@ logger = logging.getLogger("kiss3d_wrapper_local")
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO)
 
+ENV_FILE_PATH = PROJECT_ROOT / ".env"
+
+
+def _load_env_file(env_path: Path):
+    env_data = {}
+    if not env_path or not env_path.exists():
+        return env_data
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        env_data[key.strip()] = value.strip().strip('"').strip("'")
+    return env_data
+
+
+def ensure_hf_token(env_path: Path | None = None) -> bool:
+    """
+    Garante que o token do Hugging Face esteja disponível.
+    1. Carrega variáveis do arquivo .env (se existir).
+    2. Usa HUGGINGFACE_TOKEN/HF_TOKEN/HUGGINGFACE_HUB_TOKEN do ambiente.
+    3. Se existir token, executa login programaticamente para liberar os repositórios privados.
+    """
+    try:
+        from huggingface_hub import login, whoami
+    except ImportError:
+        logger.warning("huggingface_hub não está instalado; não é possível configurar o token automaticamente.")
+        return False
+
+    # Já autenticado?
+    try:
+        whoami()
+        return True
+    except Exception:
+        pass
+
+    env_path = env_path or ENV_FILE_PATH
+    env_values = _load_env_file(env_path)
+    for key, value in env_values.items():
+        os.environ.setdefault(key, value)
+
+    token = (
+        os.environ.get("HUGGINGFACE_TOKEN")
+        or os.environ.get("HUGGINGFACE_HUB_TOKEN")
+        or os.environ.get("HF_TOKEN")
+        or env_values.get("HUGGINGFACE_TOKEN")
+        or env_values.get("HF_TOKEN")
+    )
+
+    if not token:
+        logger.warning(
+            "Token do Hugging Face não informado. "
+            "Crie um arquivo .env na raiz com HF_TOKEN=<seu_token> ou exporte HUGGINGFACE_TOKEN."
+        )
+        return False
+
+    # Propagar token para todas as variáveis esperadas
+    os.environ.setdefault("HUGGINGFACE_TOKEN", token)
+    os.environ.setdefault("HF_TOKEN", token)
+    os.environ.setdefault("HUGGINGFACE_HUB_TOKEN", token)
+
+    try:
+        login(token=token, add_to_git_credential=False)
+        whoami()
+        logger.info("Hugging Face autenticado via token do .env/variáveis de ambiente.")
+        return True
+    except Exception as exc:
+        logger.error("Falha ao autenticar Hugging Face: %s", exc)
+    return False
+
 OUT_DIR_PATH = PROJECT_ROOT / "outputs"
 TMP_DIR_PATH = OUT_DIR_PATH / "tmp"
 OUT_DIR_PATH.mkdir(parents=True, exist_ok=True)

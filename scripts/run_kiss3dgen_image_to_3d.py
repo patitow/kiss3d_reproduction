@@ -116,7 +116,7 @@ sys.path.insert(0, str(project_root))
 import argparse
 import shutil
 
-from kiss3d_utils_local import TMP_DIR, OUT_DIR, ORIGINAL_WORKDIR
+from kiss3d_utils_local import TMP_DIR, OUT_DIR, ORIGINAL_WORKDIR, ensure_hf_token
 from kiss3d_wrapper_local import init_wrapper_from_config, run_image_to_3d
 
 def main():
@@ -176,6 +176,12 @@ def main():
     print(f"Use MV RGB: {args.use_mv_rgb}")
     print(f"Use ControlNet: {args.use_controlnet}")
     print("=" * 60)
+
+    print("\n[0/4] Validando credenciais HuggingFace...")
+    if ensure_hf_token(project_root / ".env"):
+        print("[OK] Token HuggingFace carregado.")
+    else:
+        print("[AVISO] Token HuggingFace nao configurado; repositorios privados podem falhar.")
     
     # Verificar se arquivo existe
     if not os.path.exists(args.input):

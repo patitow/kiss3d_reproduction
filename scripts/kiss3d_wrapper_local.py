@@ -479,10 +479,15 @@ def init_wrapper_from_config(config_path):
     logger.info("==> Loading Flux model ...")
     flux_device = config_["flux"].get("device", "cpu")
     flux_base_model_pth = config_["flux"].get("base_model", None)
-    flux_dtype = config_["flux"].get("dtype", "bf16")
+    flux_dtype = (
+        config_["flux"].get("dtype")
+        or config_["flux"].get("flux_dtype")
+        or "bf16"
+    )
     flux_controlnet_pth = config_["flux"].get("controlnet", None)
     flux_lora_pth = config_["flux"].get("lora", None)
     flux_redux_pth = config_["flux"].get("redux", None)
+    flux_cpu_offload = config_["flux"].get("cpu_offload", False)
 
     if flux_base_model_pth.endswith("safetensors"):
         flux_pipe = FluxImg2ImgPipeline.from_single_file(
@@ -511,7 +516,30 @@ def init_wrapper_from_config(config_path):
     if not os.path.exists(flux_lora_pth):
         flux_lora_pth = hf_hub_download(repo_id="LTT/Kiss3DGen", filename="rgb_normal.safetensors", repo_type="model")
     flux_pipe.load_lora_weights(flux_lora_pth)
-    flux_pipe.to(device=flux_device)
+
+    def _place_pipeline_on_device(pipe, name="pipeline"):
+        nonlocal flux_cpu_offload
+        if flux_cpu_offload:
+            logger.info("Enabling CPU offload for %s.", name)
+            pipe.enable_model_cpu_offload()
+            return True
+        try:
+            pipe.to(device=flux_device)
+            return False
+        except torch.OutOfMemoryError as exc:
+            logger.warning(
+                "OOM while moving %s to %s: %s. Falling back to CPU offload.",
+                name,
+                flux_device,
+                exc,
+            )
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            pipe.enable_model_cpu_offload()
+            flux_cpu_offload = True
+            return True
+
+    flux_cpu_offload = _place_pipeline_on_device(flux_pipe, "Flux pipeline") or flux_cpu_offload
 
     flux_redux_pipe = None
     if flux_redux_pth is not None:
@@ -524,7 +552,7 @@ def init_wrapper_from_config(config_path):
         flux_redux_pipe.tokenizer = flux_pipe.tokenizer
         flux_redux_pipe.tokenizer_2 = flux_pipe.tokenizer_2
 
-        flux_redux_pipe.to(device=flux_device)
+        _place_pipeline_on_device(flux_redux_pipe, "Flux Redux pipeline")
 
     logger.warning(
         f"GPU memory allocated after load flux model on {flux_device}: {torch.cuda.memory_allocated(device=flux_device) / 1024**3} GB"
