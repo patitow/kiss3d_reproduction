@@ -212,34 +212,45 @@ class MeshComparator:
     """Compara modelos 3D gerados com originais"""
     
     def compare_meshes(self, original_path: str, generated_path: str) -> Dict:
-        """Compara dois modelos 3D e retorna métricas"""
-        print(f"  [3/4] Comparando modelos...")
+        """Compara dois modelos 3D e retorna métricas abrangentes"""
+        print(f"  [3/4] Comparando modelos com métricas avançadas...")
         
         try:
-            original = trimesh.load(original_path)
-            generated = trimesh.load(generated_path)
+            # Carregar meshes de forma robusta
+            original = load_mesh_properly(Path(original_path), use_largest_component=True, make_watertight=False)
+            generated = load_mesh_properly(Path(generated_path), use_largest_component=True, make_watertight=False)
             
-            metrics = {
-                'original_vertices': len(original.vertices),
-                'generated_vertices': len(generated.vertices),
-                'original_faces': len(original.faces),
-                'generated_faces': len(generated.faces),
-                'original_volume': original.volume,
-                'generated_volume': generated.volume,
-                'original_bounds': original.bounds.tolist(),
-                'generated_bounds': generated.bounds.tolist(),
-            }
-            
-            # Calcular diferença de volume
-            volume_diff = abs(metrics['original_volume'] - metrics['generated_volume'])
-            metrics['volume_difference'] = volume_diff
-            metrics['volume_similarity'] = 1.0 - (volume_diff / max(metrics['original_volume'], 0.001))
+            # Usar módulo de validação para métricas avançadas
+            try:
+                from mesh3d_generator.validation.mesh_metrics import compare_meshes_comprehensive
+                metrics = compare_meshes_comprehensive(original, generated, num_samples=10000)
+                print(f"  [OK] Métricas avançadas calculadas")
+            except ImportError:
+                # Fallback para métricas básicas
+                print(f"  [AVISO] Módulo de validação não disponível, usando métricas básicas")
+                metrics = {
+                    'original_vertices': len(original.vertices),
+                    'generated_vertices': len(generated.vertices),
+                    'original_faces': len(original.faces),
+                    'generated_faces': len(generated.faces),
+                    'original_volume': float(original.volume) if original.is_watertight else None,
+                    'generated_volume': float(generated.volume) if generated.is_watertight else None,
+                    'original_bounds': original.bounds.tolist(),
+                    'generated_bounds': generated.bounds.tolist(),
+                }
+                
+                if metrics['original_volume'] and metrics['generated_volume']:
+                    volume_diff = abs(metrics['original_volume'] - metrics['generated_volume'])
+                    metrics['volume_difference'] = volume_diff
+                    metrics['volume_similarity'] = 1.0 - (volume_diff / max(metrics['original_volume'], 0.001))
             
             print(f"  [OK] Comparacao concluida")
             return metrics
             
         except Exception as e:
             print(f"  [ERRO] Erro ao comparar modelos: {e}")
+            import traceback
+            traceback.print_exc()
             return {}
     
     def render_mesh_3d(self, mesh: trimesh.Trimesh, ax, title: str, color='lightblue', use_texture=True):
@@ -262,14 +273,10 @@ class MeshComparator:
             vertices = mesh.vertices
             faces = mesh.faces
             
-            # Para renderização, usar todas as faces (não amostrar aleatoriamente)
-            # Mas limitar se muito grande para performance
-            max_faces_for_render = 5000
-            if len(faces) > max_faces_for_render:
-                # Em vez de amostrar aleatoriamente, pegar as primeiras N faces
-                # Isso mantém a estrutura do objeto
-                faces = faces[:max_faces_for_render]
-                print(f"    [INFO] Limitando renderizacao a {max_faces_for_render} faces de {len(mesh.faces)}")
+            # Para renderização, usar todas as faces
+            # NÃO limitar faces para evitar modelo incompleto na visualização
+            # Se performance for problema, usar simplificação de mesh antes
+            # faces = faces  # Usar todas as faces
             
             # Tentar usar texturas/cores se disponíveis
             face_colors = None
@@ -464,12 +471,20 @@ class MeshComparator:
                 self.render_mesh_3d(original, ax3, 'Comparacao', 'lightblue', use_texture=True)
                 ax3.view_init(elev=20, azim=45)
             
-            # Adicionar métricas como texto
+            # Adicionar métricas como texto (incluir métricas avançadas se disponíveis)
             metrics_text = f"""Métricas de Comparação:
 Vertices: {metrics.get('original_vertices', 'N/A')} vs {metrics.get('generated_vertices', 'N/A')}
 Faces: {metrics.get('original_faces', 'N/A')} vs {metrics.get('generated_faces', 'N/A')}
 Volume: {metrics.get('original_volume', 0):.6f} vs {metrics.get('generated_volume', 0):.6f}
-Similaridade de Volume: {metrics.get('volume_similarity', 0):.2%}"""
+Similaridade de Volume: {metrics.get('volume_similarity', 0):.2% if metrics.get('volume_similarity') else 'N/A'}"""
+            
+            # Adicionar métricas avançadas se disponíveis
+            if metrics.get('chamfer_distance') is not None:
+                metrics_text += f"\nChamfer Distance: {metrics['chamfer_distance']:.6f}"
+            if metrics.get('hausdorff_distance') is not None:
+                metrics_text += f"\nHausdorff Distance: {metrics['hausdorff_distance']:.6f}"
+            if metrics.get('texture_ssim') is not None:
+                metrics_text += f"\nTexture SSIM: {metrics['texture_ssim']:.4f}"
             
             fig.text(0.5, 0.01, metrics_text, ha='center', fontsize=9, 
                     bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.7))
@@ -487,8 +502,8 @@ Similaridade de Volume: {metrics.get('volume_similarity', 0):.2%}"""
     
     def create_rotation_gif(self, original_path: str, generated_path: str, 
                             output_path: str, frames: int = 60, input_image_path: Optional[str] = None):
-        """Cria GIF com ambos modelos girando lado a lado, incluindo imagem de input"""
-        print(f"  [5/5] Criando GIF rotativo completo...")
+        """Cria GIF com ambos modelos girando lado a lado (comparação), incluindo imagem de input"""
+        print(f"  [5/5] Criando GIF rotativo de comparação (original vs gerado)...")
         
         try:
             # Carregar meshes de forma robusta
@@ -674,7 +689,7 @@ def load_mesh_properly(mesh_path: Path, use_largest_component: bool = True,
     else:
         mesh = scene_or_mesh
     
-    # Se mesh foi carregado diretamente, tentar carregar texturas do diretório
+    # Se mesh foi carregado diretamente sem texturas, tentar carregar do diretório
     if not hasattr(mesh.visual, 'material') or mesh.visual.material is None:
         # Tentar carregar textura do diretório do mesh
         mesh_dir = mesh_path.parent
@@ -690,24 +705,8 @@ def load_mesh_properly(mesh_path: Path, use_largest_component: bool = True,
                                 mesh.visual.material = geom.visual.material
                                 print(f"  [INFO] Material/textura carregado do Scene")
                                 break
-            except:
-                pass
-    
-    # Se for Scene, converter para mesh único
-    if isinstance(mesh, trimesh.Scene):
-        if len(mesh.geometry) > 0:
-            # Concatenar todas as geometrias
-            meshes = []
-            for geom in mesh.geometry.values():
-                if isinstance(geom, trimesh.Trimesh):
-                    meshes.append(geom)
-            if meshes:
-                mesh = trimesh.util.concatenate(meshes)
-                print(f"  [INFO] Scene convertida: {len(meshes)} geometrias concatenadas")
-            else:
-                raise ValueError("Scene não contém meshes válidos")
-        else:
-            raise ValueError("Scene vazia")
+            except Exception as e:
+                print(f"  [AVISO] Nao foi possivel carregar texturas do Scene: {e}")
     
     # Garantir que é Trimesh
     if not isinstance(mesh, trimesh.Trimesh):
@@ -1013,10 +1012,14 @@ def process_single_object(model_name: str, dataset_path: Path, output_path: Path
     
     print(f"[OK] Mesh original encontrado: {original_mesh.name}")
     
-    # 6. Tentar gerar mesh via ComfyUI (se disponível)
-    # Por enquanto, criar mesh placeholder melhorado baseado no original
-    print(f"  [AVISO] Geracao de mesh via ComfyUI ainda nao implementada completamente")
-    print(f"  [INFO] Usando mesh placeholder baseado no original para demonstracao")
+     # 6. GERAR MESH VIA KISS3DGEN PIPELINE
+     # TODO: Implementar pipeline completo Kiss3DGen:
+     #   - Gerar reference 3D bundle image (Zero123)
+     #   - Gerar 3D bundle image final (Flux + ControlNet)
+     #   - Reconstruir mesh (LRM + ISOMER)
+     print(f"  [AVISO CRITICO] Pipeline Kiss3DGen completo ainda nao implementado")
+     print(f"  [AVISO] Usando mesh placeholder baseado no original (NAO E GERACAO REAL)")
+     print(f"  [AVISO] Texturas nao sao geradas via difusao - apenas copiadas do original")
     
     try:
         # Carregar mesh original de forma robusta
@@ -1063,13 +1066,8 @@ def process_single_object(model_name: str, dataset_path: Path, output_path: Path
             generated_mesh.remove_unreferenced_vertices()
             generated_mesh.update_faces(generated_mesh.nondegenerate_faces())
             
-            # Preservar texturas se disponíveis
-            if hasattr(original.visual, 'material') and original.visual.material is not None:
-                generated_mesh.visual.material = original.visual.material
-            if hasattr(original.visual, 'vertex_colors') and original.visual.vertex_colors is not None:
-                # Ajustar vertex colors se número de vértices mudou
-                if len(generated_mesh.vertices) == len(original.vertices):
-                    generated_mesh.visual.vertex_colors = original.visual.vertex_colors
+            # NÃO copiar texturas do original - devem ser geradas via difusão
+            # Texturas serão geradas quando implementarmos o pipeline completo de difusão
             
             print(f"  [INFO] Mesh placeholder criado: {len(generated_mesh.vertices)} vertices, {len(generated_mesh.faces)} faces")
             
@@ -1087,18 +1085,57 @@ def process_single_object(model_name: str, dataset_path: Path, output_path: Path
             generated_mesh.update_faces(generated_mesh.unique_faces())
             generated_mesh.remove_unreferenced_vertices()
         
-        # Exportar mesh gerado com texturas preservadas
-        generated_mesh_path = export_mesh_with_textures(
-            generated_mesh,
-            model_output_dir,
-            original_mesh_path=original_mesh,
-            mesh_name="generated_mesh"
-        )
-        print(f"  [OK] Mesh placeholder exportado: {len(generated_mesh.vertices)} vertices, {len(generated_mesh.faces)} faces")
+        # AVISO: Atualmente estamos usando mesh placeholder
+        # CORREÇÃO NECESSÁRIA: Texturas devem ser GERADAS usando difusão baseada na imagem de input
+        # Seguir pipeline Kiss3DGen: gerar 3D bundle image via Flux diffusion
+        print(f"  [AVISO] Usando mesh placeholder - geração real via difusão ainda não implementada")
+        print(f"  [AVISO] Texturas devem ser GERADAS via difusão baseada na imagem de input")
+        
+        # Nomear arquivos com nome do objeto
+        object_name_safe = model_name.replace(' ', '_').replace('/', '_')
+        generated_obj_name = f"generated_{object_name_safe}.obj"
+        original_obj_name = f"original_{object_name_safe}.obj"
+        
+        # Exportar mesh gerado (sem texturas por enquanto - serão geradas via difusão)
+        generated_mesh_path = model_output_dir / generated_obj_name
+        generated_mesh.export(str(generated_mesh_path))
+        print(f"  [OK] Mesh gerado exportado: {generated_obj_name} ({len(generated_mesh.vertices)} vertices, {len(generated_mesh.faces)} faces)")
+        
+        # Copiar mesh original com nome adequado
+        original_mesh_copy_path = model_output_dir / original_obj_name
+        original_copy = original.copy()
+        original_copy.export(str(original_mesh_copy_path))
+        print(f"  [OK] Mesh original copiado: {original_obj_name}")
+        
+        # Validar mesh gerado
+        print(f"  [INFO] Validando mesh gerado...")
+        try:
+            from mesh3d_generator.validation.mesh_metrics import validate_mesh_quality
+            generated_quality = validate_mesh_quality(generated_mesh)
+            print(f"  [INFO] Qualidade do mesh gerado:")
+            print(f"    - Watertight: {generated_quality.get('is_watertight', 'N/A')}")
+            print(f"    - Volume: {generated_quality.get('volume', 'N/A')}")
+            print(f"    - Componentes: {generated_quality.get('num_components', 'N/A')}")
+            
+            # Tentar tornar watertight se não for
+            if not generated_quality.get('is_watertight', False):
+                print(f"  [INFO] Tentando tornar mesh watertight...")
+                try:
+                    generated_mesh.fill_holes()
+                    if generated_mesh.is_watertight:
+                        print(f"  [OK] Mesh agora é watertight")
+                        # Re-exportar mesh watertight
+                        generated_mesh.export(str(generated_mesh_path))
+                    else:
+                        print(f"  [AVISO] Não foi possível tornar mesh watertight")
+                except Exception as e:
+                    print(f"  [AVISO] Erro ao tentar tornar watertight: {e}")
+        except ImportError:
+            print(f"  [AVISO] Módulo de validação não disponível")
         
         # Comparar modelos
         print(f"  [INFO] Comparando modelos...")
-        metrics = comparator.compare_meshes(str(original_mesh), str(generated_mesh_path))
+        metrics = comparator.compare_meshes(str(original_mesh_copy_path), str(generated_mesh_path))
         
         # Salvar métricas
         with open(model_output_dir / "metrics.json", 'w', encoding='utf-8') as f:
@@ -1106,24 +1143,77 @@ def process_single_object(model_name: str, dataset_path: Path, output_path: Path
         
         # 7. Criar visualização comparativa
         comparison_image = model_output_dir / "comparison.png"
+        preprocessed_path = model_output_dir / "input_preprocessed.png"
         comparator.create_comparison_image(
-            str(original_mesh), str(generated_mesh_path), 
-            str(comparison_image), metrics, str(input_image_copy)
+            str(original_mesh_copy_path), str(generated_mesh_path), 
+            str(comparison_image), metrics, 
+            str(input_image_copy) if input_image_copy.exists() else None,
+            str(preprocessed_path) if preprocessed_path.exists() else None
         )
         
-        # 8. Criar GIF rotativo
+        # 8. Criar GIF rotativo lado a lado (original vs gerado)
         rotation_gif = model_output_dir / "rotation_comparison.gif"
         comparator.create_rotation_gif(
-            str(original_mesh), str(generated_mesh_path),
+            str(original_mesh_copy_path), str(generated_mesh_path),
             str(rotation_gif), frames=60,
             input_image_path=str(input_image_copy) if input_image_copy.exists() else None
         )
+        
+        # 9. Exportar para GLB com texturas (se disponíveis)
+        print(f"  [INFO] Exportando para GLB com texturas...")
+        try:
+            # Carregar meshes novamente para garantir texturas
+            original_for_glb = load_mesh_properly(original_mesh, use_largest_component=True, make_watertight=False)
+            generated_for_glb = load_mesh_properly(Path(generated_mesh_path), use_largest_component=True, make_watertight=False)
+            
+            # Tentar copiar texturas do original para o gerado (temporário até implementar geração via difusão)
+            texture_applied = False
+            if hasattr(original_for_glb.visual, 'material') and original_for_glb.visual.material is not None:
+                if hasattr(original_for_glb.visual.material, 'image') and original_for_glb.visual.material.image is not None:
+                    # Aplicar textura ao mesh gerado temporariamente
+                    generated_for_glb.visual.material = original_for_glb.visual.material
+                    texture_applied = True
+                    print(f"  [INFO] Textura de imagem aplicada do original ao mesh gerado (temporário)")
+                elif hasattr(original_for_glb.visual.material, 'main_color'):
+                    # Aplicar cor do material
+                    generated_for_glb.visual.material = original_for_glb.visual.material
+                    texture_applied = True
+                    print(f"  [INFO] Cor de material aplicada do original ao mesh gerado (temporário)")
+            
+            if not texture_applied and hasattr(original_for_glb.visual, 'vertex_colors') and original_for_glb.visual.vertex_colors is not None:
+                # Aplicar vertex colors se disponíveis
+                if len(generated_for_glb.vertices) == len(original_for_glb.vertices):
+                    generated_for_glb.visual.vertex_colors = original_for_glb.visual.vertex_colors
+                    texture_applied = True
+                    print(f"  [INFO] Vertex colors aplicados do original ao mesh gerado (temporário)")
+            
+            if not texture_applied:
+                print(f"  [AVISO] Nenhuma textura disponível para aplicar")
+            
+            # Exportar mesh gerado para GLB
+            generated_glb_path = model_output_dir / f"generated_{object_name_safe}.glb"
+            generated_for_glb.export(str(generated_glb_path))
+            print(f"  [OK] GLB gerado exportado: {generated_glb_path.name}")
+            
+            # Exportar mesh original para GLB também
+            original_glb_path = model_output_dir / f"original_{object_name_safe}.glb"
+            original_for_glb.export(str(original_glb_path))
+            print(f"  [OK] GLB original exportado: {original_glb_path.name}")
+            
+        except Exception as e:
+            print(f"  [AVISO] Erro ao exportar GLB: {e}")
+            import traceback
+            traceback.print_exc()
         
         print(f"\n[OK] Pipeline concluido para {model_name}")
         print(f"  - Descricao: {model_output_dir / 'description.txt'}")
         print(f"  - Metricas: {model_output_dir / 'metrics.json'}")
         print(f"  - Comparacao: {comparison_image}")
-        print(f"  - GIF: {rotation_gif}")
+        print(f"  - GIF comparacao: {rotation_gif}")
+        print(f"  - OBJ original: {original_obj_name}")
+        print(f"  - OBJ gerado: {generated_obj_name}")
+        print(f"  - GLB original: original_{object_name_safe}.glb")
+        print(f"  - GLB gerado: generated_{object_name_safe}.glb")
         
         return True
         
