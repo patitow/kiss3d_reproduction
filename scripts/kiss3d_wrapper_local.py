@@ -147,8 +147,12 @@ class kiss3d_wrapper(object):
             return torch.no_grad()
 
     def get_image_caption(self, image):
-        torch_dtype = torch.bfloat16
         caption_device = self.config["caption"].get("device", "cpu")
+        torch_dtype = (
+            torch.bfloat16
+            if isinstance(caption_device, str) and caption_device.startswith("cuda")
+            else torch.float32
+        )
 
         if isinstance(image, str):  # If image is a file path
             image = preprocess_input_image(Image.open(image))
@@ -233,8 +237,7 @@ class kiss3d_wrapper(object):
         gen_device = mv_device if isinstance(mv_device, str) and mv_device.startswith("cuda") else "cpu"
 
         generator = torch.Generator(device=gen_device).manual_seed(seed)
-        autocast_enabled = isinstance(mv_device, str) and mv_device.startswith("cuda")
-        with self.context(), torch.cuda.amp.autocast(enabled=autocast_enabled, dtype=torch.float16):
+        with self.context():
             mv_image = self.multiview_pipeline(
                 image,
                 num_inference_steps=num_inference_steps or self.config["multiview"]["num_inference_steps"],
@@ -251,8 +254,7 @@ class kiss3d_wrapper(object):
         rgb_multi_view = (
             torch.from_numpy(rgb_multi_view).squeeze(0).permute(2, 0, 1).contiguous()
         )
-        target_dtype = torch.float16 if isinstance(recon_device, str) and recon_device.startswith("cuda") else torch.float32
-        rgb_multi_view = rgb_multi_view.to(dtype=target_dtype)
+        rgb_multi_view = rgb_multi_view.to(dtype=torch.float32)
         rgb_multi_view = rearrange(
             rgb_multi_view,
             "c (n h) (m w) -> (n m) c h w",
@@ -260,8 +262,7 @@ class kiss3d_wrapper(object):
             m=self.multiview_cols,
         ).unsqueeze(0).to(recon_device)
 
-        autocast_enabled = isinstance(recon_device, str) and recon_device.startswith("cuda")
-        with self.context(), torch.cuda.amp.autocast(enabled=autocast_enabled, dtype=torch.float16):
+        with self.context():
             vertices, faces, lrm_multi_view_normals, lrm_multi_view_rgb, lrm_multi_view_albedo = lrm_reconstruct(
                 self.recon_model,
                 self.recon_model_config.infer_config,
@@ -388,21 +389,11 @@ class kiss3d_wrapper(object):
         control_mode_idx = [control_mode_dict[mode] for mode in control_mode]
 
         extra_kwargs = {
-            "generator": generator,
-            "control_images": control_image,
+            "control_image": control_image,
             "control_mode": control_mode_idx,
             "control_guidance_start": control_guidance_start,
             "control_guidance_end": control_guidance_end,
             "controlnet_conditioning_scale": controlnet_conditioning_scale,
-            "added_cond_kwargs": None,
-            "num_images_per_prompt": 1,
-            "cross_attention_kwargs": None,
-            "return_dict": True,
-            "callback": None,
-            "moments": None,
-            "mask_image": None,
-            "mask_image_attention": None,
-            "mask_image_latents": None,
         }
 
         with self.context():
@@ -490,24 +481,17 @@ class kiss3d_wrapper(object):
         """
         reference_3d_bundle_image: Tensor, shape (N, C, H, W)
         """
-        control_image = []
-        control_mode = []
-
         if isinstance(reference_3d_bundle_image, torch.Tensor):
             ref_image = reference_3d_bundle_image.detach().cpu().clamp(0, 1)
         else:
             raise NotImplementedError
 
-        for mode in control_mode if isinstance(control_mode, list) else [control_mode]:
-            if mode == "tile":
-                tile_image = torchvision.transforms.functional.gaussian_blur(
-                    ref_image, kernel_size=kwargs.get("kernel_size", 31), sigma=kwargs.get("sigma", 2.0)
-                )
-                control_image.append(tile_image)
-            else:
-                raise NotImplementedError
-
-        return control_image[0]
+        if mode == "tile":
+            tile_image = torchvision.transforms.functional.gaussian_blur(
+                ref_image, kernel_size=kwargs.get("kernel_size", 31), sigma=kwargs.get("sigma", 2.0)
+            )
+            return tile_image
+        raise NotImplementedError(f"Unsupported control mode: {mode}")
 
     def reconstruct_3d_bundle_image(
         self,
@@ -536,19 +520,16 @@ class kiss3d_wrapper(object):
             )[:2]
 
         save_paths = os.path.join(OUT_DIR, f"{self.uuid}.glb")
-        recon_device = self.config["reconstruction"].get("device", "cpu")
-        autocast_enabled = isinstance(recon_device, str) and recon_device.startswith("cuda")
-        with torch.cuda.amp.autocast(enabled=autocast_enabled, dtype=torch.float16):
-            isomer_reconstruct(
-                rgb_multi_view,
-                normal_multi_view,
-                multi_view_mask,
-                vertices,
-                faces,
-                save_paths=[save_paths],
-                radius=isomer_radius,
-                reconstruction_stage2_steps=reconstruction_stage2_steps,
-            )
+        isomer_reconstruct(
+            rgb_multi_view,
+            normal_multi_view,
+            multi_view_mask,
+            vertices,
+            faces,
+            save_paths=[save_paths],
+            radius=isomer_radius,
+            reconstruction_stage2_steps=reconstruction_stage2_steps,
+        )
         _empty_cuda_cache()
 
         if save_intermediate_results:
@@ -734,8 +715,6 @@ def init_wrapper_from_config(
     state_dict = torch.load(model_ckpt_path, map_location="cpu")["state_dict"]
     state_dict = {k[14:]: v for k, v in state_dict.items() if k.startswith("lrm_generator.")}
     recon_model.load_state_dict(state_dict, strict=True)
-    if isinstance(recon_device, str) and recon_device.startswith("cuda"):
-        recon_model = recon_model.half()
     recon_model.to(recon_device)
     recon_model.init_flexicubes_geometry(recon_device, fovy=50.0)
     recon_model.eval()
