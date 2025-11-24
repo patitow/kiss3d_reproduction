@@ -11,12 +11,18 @@ from PIL import Image
 import time
 
 import torchvision
+from torchvision.transforms import functional as TF
 from transformers import AutoProcessor, AutoModelForCausalLM, AutoTokenizer
 from models.llm.llm import load_llm_model, get_llm_response
 
 from diffusers import FluxPipeline, DiffusionPipeline, EulerAncestralDiscreteScheduler, FluxTransformer2DModel
 from diffusers.models.controlnets.controlnet_flux import FluxMultiControlNetModel, FluxControlNetModel
 from diffusers.schedulers import FlowMatchHeunDiscreteScheduler
+
+try:
+    import cv2
+except Exception:
+    cv2 = None
 
 from huggingface_hub import hf_hub_download
 
@@ -185,7 +191,15 @@ class kiss3d_wrapper(object):
 
     def get_detailed_prompt(self, prompt, seed=None):
         if self.llm_model is not None:
-            detailed_prompt = get_llm_response(self.llm_model, self.llm_tokenizer, prompt, seed=seed)
+            instruction = (
+                "You are an expert 3D asset prompt engineer. Given the base caption below, "
+                "produce a single, detailed paragraph that describes the object's geometry, "
+                "materials, colors, finishes, logos/text, and any distinctive features for all four canonical views "
+                "(front, left, back, right). Avoid backgrounds or scene descriptions; focus strictly on the object. "
+                "Mention relative proportions and any manufacturing marks or textures if visible."
+            )
+            llm_input = f"{instruction}\n\nBase caption:\n{prompt}\n"
+            detailed_prompt = get_llm_response(self.llm_model, self.llm_tokenizer, llm_input, seed=seed)
 
             logger.info(f'LLM refined prompt result: "{detailed_prompt}"')
             return detailed_prompt
@@ -479,18 +493,76 @@ class kiss3d_wrapper(object):
 
     def preprocess_controlnet_cond_image(self, reference_3d_bundle_image, mode, **kwargs):
         """
-        reference_3d_bundle_image: Tensor, shape (N, C, H, W)
+        Normaliza e gera mapas de condicionamento para o ControlNet Union.
         """
-        if isinstance(reference_3d_bundle_image, torch.Tensor):
-            ref_image = reference_3d_bundle_image.detach().cpu().clamp(0, 1)
-        else:
-            raise NotImplementedError
+
+        def _ensure_tensor(img):
+            if isinstance(img, torch.Tensor):
+                tensor = img.detach().clone()
+                if tensor.dim() == 3:
+                    tensor = tensor.unsqueeze(0)
+                return tensor
+            if isinstance(img, Image.Image):
+                return torchvision.transforms.ToTensor()(img).unsqueeze(0)
+            raise NotImplementedError(f"Unexpected control reference type: {type(img)}")
+
+        def _kernel_tuple(value):
+            if isinstance(value, int):
+                k = value if value % 2 == 1 else value + 1
+                return (k, k)
+            if isinstance(value, (list, tuple)):
+                norm = []
+                for v in value:
+                    k = int(v)
+                    k = k if k % 2 == 1 else k + 1
+                    norm.append(k)
+                if len(norm) == 1:
+                    norm = norm * 2
+                return tuple(norm[:2])
+            return (51, 51)
+
+        kernel_size = _kernel_tuple(kwargs.get("kernel_size", 51))
+        sigma = kwargs.get("sigma", 2.0)
+        down_scale = kwargs.get("down_scale", 1)
+        threshold1 = kwargs.get("canny_threshold1", 100)
+        threshold2 = kwargs.get("canny_threshold2", 200)
+
+        ref_image = _ensure_tensor(reference_3d_bundle_image).to(torch.float32).clamp(0, 1)
+
+        if down_scale and down_scale > 1:
+            h = max(32, ref_image.shape[-2] // down_scale)
+            w = max(32, ref_image.shape[-1] // down_scale)
+            ref_image = TF.resize(ref_image, size=[h, w], antialias=True)
 
         if mode == "tile":
-            tile_image = torchvision.transforms.functional.gaussian_blur(
-                ref_image, kernel_size=kwargs.get("kernel_size", 31), sigma=kwargs.get("sigma", 2.0)
+            blurred = TF.gaussian_blur(ref_image, kernel_size=kernel_size, sigma=sigma)
+            return blurred
+
+        if mode == "gray":
+            gray = TF.rgb_to_grayscale(ref_image, num_output_channels=3)
+            return gray
+
+        if mode == "canny":
+            if cv2 is None:
+                raise ImportError("opencv-python nao esta instalado; necessario para control_mode 'canny'.")
+            np_img = (ref_image.permute(0, 2, 3, 1).cpu().numpy() * 255).astype(np.uint8)
+            canny_outputs = []
+            for sample in np_img:
+                edges = cv2.Canny(sample, threshold1=threshold1, threshold2=threshold2)
+                edges = cv2.cvtColor(edges, cv2.COLOR_GRAY2RGB)
+                canny_outputs.append(edges)
+            canny = torch.from_numpy(np.stack(canny_outputs)).permute(0, 3, 1, 2).float() / 255.0
+            return canny
+
+        if mode == "depth":
+            gray = TF.rgb_to_grayscale(ref_image, num_output_channels=1)
+            blurred = TF.gaussian_blur(gray, kernel_size=kernel_size, sigma=sigma)
+            depth = (blurred - blurred.amin(dim=(-2, -1), keepdim=True)) / (
+                blurred.amax(dim=(-2, -1), keepdim=True) - blurred.amin(dim=(-2, -1), keepdim=True) + 1e-6
             )
-            return tile_image
+            depth = depth.repeat(1, 3, 1, 1)
+            return depth
+
         raise NotImplementedError(f"Unsupported control mode: {mode}")
 
     def reconstruct_3d_bundle_image(
@@ -588,6 +660,7 @@ def init_wrapper_from_config(
     logger.info("==> Loading Flux model ...")
     flux_device = config_["flux"].get("device", "cpu")
     flux_base_model_pth = config_["flux"].get("base_model", None)
+    flux_fallback_model = config_["flux"].get("fallback_base_model")
     flux_dtype = (
         config_["flux"].get("dtype")
         or config_["flux"].get("flux_dtype")
@@ -598,21 +671,36 @@ def init_wrapper_from_config(
     flux_redux_pth = config_["flux"].get("redux", None) if load_redux else None
     flux_cpu_offload = config_["flux"].get("cpu_offload", False)
 
-    if flux_base_model_pth.endswith("safetensors"):
-        flux_pipe = FluxImg2ImgPipeline.from_single_file(
-            flux_base_model_pth,
-            torch_dtype=dtype_[flux_dtype],
-        )
-    else:
-        flux_pipe = FluxImg2ImgPipeline.from_pretrained(
-            flux_base_model_pth,
+    def _load_flux_pipeline(model_id: str):
+        if model_id.endswith("safetensors"):
+            return FluxImg2ImgPipeline.from_single_file(
+                model_id,
+                torch_dtype=dtype_[flux_dtype],
+            )
+        return FluxImg2ImgPipeline.from_pretrained(
+            model_id,
             torch_dtype=dtype_[flux_dtype],
         )
 
+    try:
+        flux_pipe = _load_flux_pipeline(flux_base_model_pth)
+    except EnvironmentError as exc:
+        if flux_fallback_model and flux_fallback_model != flux_base_model_pth:
+            logger.warning(
+                "Falha ao carregar %s (%s). Tentando fallback %s.",
+                flux_base_model_pth,
+                exc,
+                flux_fallback_model,
+            )
+            flux_pipe = _load_flux_pipeline(flux_fallback_model)
+        else:
+            raise
+
     if flux_controlnet_pth is not None:
+        controlnet_dtype = dtype_[flux_dtype] if flux_dtype != "fp8" else torch.bfloat16
         flux_controlnet = FluxControlNetModel.from_pretrained(
             flux_controlnet_pth,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=controlnet_dtype,
         )
         flux_pipe = convert_flux_pipeline(
             flux_pipe,
@@ -626,14 +714,29 @@ def init_wrapper_from_config(
         flux_lora_pth = hf_hub_download(repo_id="LTT/Kiss3DGen", filename="rgb_normal.safetensors", repo_type="model")
     flux_pipe.load_lora_weights(flux_lora_pth)
 
+    def _apply_memory_optimizations(pipe):
+        if hasattr(pipe, "enable_attention_slicing"):
+            pipe.enable_attention_slicing("max")
+        if hasattr(pipe, "enable_vae_slicing"):
+            try:
+                pipe.enable_vae_slicing()
+            except Exception:
+                pass
+
     def _place_pipeline_on_device(pipe, name="pipeline"):
         nonlocal flux_cpu_offload
+
+        def _offload(target_pipe):
+            logger.info("Enabling sequential CPU offload for %s.", name)
+            target_pipe.enable_sequential_cpu_offload()
+            _apply_memory_optimizations(target_pipe)
+
         if flux_cpu_offload:
-            logger.info("Enabling CPU offload for %s.", name)
-            pipe.enable_model_cpu_offload()
+            _offload(pipe)
             return True
         try:
             pipe.to(device=flux_device)
+            _apply_memory_optimizations(pipe)
             return False
         except torch.OutOfMemoryError as exc:
             logger.warning(
@@ -644,7 +747,7 @@ def init_wrapper_from_config(
             )
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            pipe.enable_model_cpu_offload()
+            _offload(pipe)
             flux_cpu_offload = True
             return True
 
@@ -772,21 +875,75 @@ def run_image_to_3d(k3d_wrapper, input_image_path, enable_redux=True, use_mv_rgb
     else:
         redux_hparam = None
 
+    flux_cfg = k3d_wrapper.config.get("flux", {})
+
+    def _expand_sequence(value, default, target_len):
+        if isinstance(value, (list, tuple)):
+            seq = list(value)
+        else:
+            seq = [value]
+        if not seq:
+            seq = [default]
+        while len(seq) < target_len:
+            seq.append(seq[-1])
+        return seq
+
+    flux_ready_image = TF.resize(
+        reference_3d_bundle_image,
+        [k3d_wrapper.flux_height, k3d_wrapper.flux_width],
+        antialias=True,
+    ).unsqueeze(0).clamp(0.0, 1.0)
+    logger.info(
+        "Flux input ajustado para %dx%d",
+        k3d_wrapper.flux_height,
+        k3d_wrapper.flux_width,
+    )
+    logger.info("Flux input resized to %s", tuple(flux_ready_image.shape))
+
     if use_controlnet:
-        control_mode = ["tile"]
+        control_mode = flux_cfg.get("controlnet_modes", ["tile"])
+        control_kernel = flux_cfg.get("controlnet_kernel_size", 51)
+        control_sigma = flux_cfg.get("controlnet_sigma", 2.0)
+        control_downscale = flux_cfg.get("controlnet_down_scale", 1)
+        control_guidance_start = flux_cfg.get("controlnet_guidance_start", 0.0)
+        control_guidance_end = flux_cfg.get("controlnet_guidance_end", 0.65)
+        controlnet_conditioning_scale = flux_cfg.get("controlnet_conditioning_scale", 0.6)
+
+        control_mode = list(control_mode) if isinstance(control_mode, (list, tuple)) else [control_mode]
+        if k3d_wrapper.fast_mode and len(control_mode) > 1:
+            logger.info(
+                "Fast mode ativo: reduzindo controlnet_modes de %s para %s",
+                control_mode,
+                control_mode[:1],
+            )
+            control_mode = control_mode[:1]
+        control_guidance_start = _expand_sequence(control_guidance_start, 0.0, len(control_mode))
+        control_guidance_end = _expand_sequence(control_guidance_end, 0.65, len(control_mode))
+        controlnet_conditioning_scale = _expand_sequence(
+            controlnet_conditioning_scale, 0.6, len(control_mode)
+        )
+
         control_image = [
             k3d_wrapper.preprocess_controlnet_cond_image(
-                reference_3d_bundle_image, mode_, down_scale=1, kernel_size=51, sigma=2.0
+                reference_3d_bundle_image,
+                mode_,
+                down_scale=control_downscale,
+                kernel_size=control_kernel,
+                sigma=control_sigma,
             )
             for mode_ in control_mode
         ]
-        control_guidance_start = [0.0]
-        control_guidance_end = [0.65]
-        controlnet_conditioning_scale = [0.6]
+        control_dtype = getattr(k3d_wrapper.flux_pipeline.controlnet, "dtype", flux_ready_image.dtype)
+        control_image = [
+            TF.resize(img, [k3d_wrapper.flux_height, k3d_wrapper.flux_width], antialias=True).to(
+                dtype=control_dtype
+            )
+            for img in control_image
+        ]
 
         gen_3d_bundle_image, gen_save_path = k3d_wrapper.generate_3d_bundle_image_controlnet(
             prompt=caption,
-            image=reference_3d_bundle_image.unsqueeze(0),
+            image=flux_ready_image,
             strength=0.95,
             control_image=control_image,
             control_mode=control_mode,
@@ -799,7 +956,7 @@ def run_image_to_3d(k3d_wrapper, input_image_path, enable_redux=True, use_mv_rgb
     else:
         gen_3d_bundle_image, gen_save_path = k3d_wrapper.generate_3d_bundle_image_text(
             prompt=caption,
-            image=reference_3d_bundle_image.unsqueeze(0),
+            image=flux_ready_image,
             strength=0.95,
             lora_scale=1.0,
             redux_hparam=redux_hparam,
@@ -815,4 +972,5 @@ def run_image_to_3d(k3d_wrapper, input_image_path, enable_redux=True, use_mv_rgb
     )
 
     return gen_save_path, recon_mesh_path
+
 

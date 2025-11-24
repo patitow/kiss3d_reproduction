@@ -3,6 +3,16 @@ import sys
 import logging
 import time
 from pathlib import Path
+from typing import Dict, Any
+
+import numpy as np
+import torch
+import torchvision
+from torchvision.transforms import v2
+from PIL import Image
+import rembg
+import trimesh
+from scipy.spatial import cKDTree
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 KISS3D_ROOT = PROJECT_ROOT / "Kiss3DGen"
@@ -13,13 +23,6 @@ if str(KISS3D_ROOT) not in sys.path:
 ORIGINAL_WORKDIR = Path.cwd()
 if ORIGINAL_WORKDIR != KISS3D_ROOT:
     os.chdir(str(KISS3D_ROOT))
-
-import numpy as np
-import torch
-import torchvision
-from torchvision.transforms import v2
-from PIL import Image
-import rembg
 
 from models.lrm.online_render.render_single import load_mipmap, render_mesh
 from models.lrm.utils.camera_util import (
@@ -129,6 +132,73 @@ TMP_DIR = str(TMP_DIR_PATH)
 
 rembg_session = rembg.new_session("isnet-general-use")
 normal_transfer = NormalTransfer()
+
+
+def evaluate_mesh_against_gt(
+    pred_mesh_path: str | Path,
+    gt_mesh_path: str | Path,
+    num_samples: int = 50000,
+    normalize: bool = True,
+    thresholds: tuple[float, ...] = (0.01, 0.02),
+) -> Dict[str, Any]:
+    """
+    Compara a malha reconstruída com um ground-truth usando amostragem de superfície
+    e distância de Chamfer.
+    """
+
+    pred_mesh = trimesh.load_mesh(pred_mesh_path, force="mesh")
+    gt_mesh = trimesh.load_mesh(gt_mesh_path, force="mesh")
+
+    def _sample_points(mesh):
+        pts, _ = trimesh.sample.sample_surface(mesh, num_samples)
+        return pts
+
+    def _normalize_points(points):
+        if not normalize:
+            return points
+        center = points.mean(axis=0, keepdims=True)
+        pts = points - center
+        scale = np.linalg.norm(points.max(axis=0) - points.min(axis=0))
+        if scale > 0:
+            pts = pts / scale
+        return pts
+
+    pred_pts = _normalize_points(_sample_points(pred_mesh))
+    gt_pts = _normalize_points(_sample_points(gt_mesh))
+
+    pred_tree = cKDTree(pred_pts)
+    gt_tree = cKDTree(gt_pts)
+
+    dist_pred_to_gt, _ = pred_tree.query(gt_pts, k=1)
+    dist_gt_to_pred, _ = gt_tree.query(pred_pts, k=1)
+
+    chamfer_l1 = float(dist_pred_to_gt.mean() + dist_gt_to_pred.mean())
+    chamfer_l2 = float((dist_pred_to_gt ** 2).mean() + (dist_gt_to_pred ** 2).mean())
+
+    f_scores: Dict[str, Dict[str, float]] = {}
+    for thr in thresholds:
+        thr_val = float(thr)
+        recall = float((dist_pred_to_gt < thr_val).mean())
+        precision = float((dist_gt_to_pred < thr_val).mean())
+        denom = precision + recall
+        f1 = float(2 * precision * recall / denom) if denom > 0 else 0.0
+        f_scores[f"{thr_val:.4f}"] = {
+            "precision": precision,
+            "recall": recall,
+            "fscore": f1,
+        }
+
+    metrics = {
+        "pred_mesh": str(pred_mesh_path),
+        "gt_mesh": str(gt_mesh_path),
+        "num_samples": num_samples,
+        "normalized": normalize,
+        "chamfer_l1": chamfer_l1,
+        "chamfer_l2": chamfer_l2,
+        "f_scores": f_scores,
+    }
+
+    return metrics
 
 
 def lrm_reconstruct(

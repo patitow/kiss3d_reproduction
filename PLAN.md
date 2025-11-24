@@ -75,6 +75,14 @@
 - Os utilitários originais (`lrm_reconstruct`, `isomer_reconstruct`, `preprocess_input_image`, etc.) vivem em `scripts/kiss3d_utils_local.py`, o que evita depender diretamente do pacote `pipeline`.
 - `kiss3d_wrapper_local.py` replica o wrapper do artigo e continua carregando os modelos (Flux/ControlNet/Redux, Zero123++ custom pipeline, LRM/ISOMER, Florence-2 e o LLM opcional) com paths resolvidos em tempo de execução.
 
+**Notas de 25/11**
+- `run_kiss3dgen_image_to_3d.py` agora aceita `--dataset-item/--dataset-view` e busca automaticamente os assets em `data/raw/gazebo_dataset`, ajustando o `--input` e a malha ground-truth correspondente (`models/<item>/meshes/model.obj`). Isso permite comparar a saída gerada com um alvo real do dataset.
+- Foi adicionada a avaliação quantitativa opcional (`--gt-mesh`, `--gt-samples`, `--metrics-out`), baseada em amostragem de superfície (`trimesh`) e distância de Chamfer/F-score com normalização opcional entre os modelos.
+- No wrapper, o bloco de ControlNet suporta múltiplos condicionamentos simultâneos (tile + canny + pseudo depth), extraindo mapas auxiliares em resoluções menores quando necessário. Os parâmetros padrão são lidos de `flux.controlnet_*` no `default.yaml`, facilitando ajustes de guidance/escala direto no preset.
+- Implementada execução multi-view automática: ao passar `--dataset-view all` o script processa todas as vistas, salva os resultados intermediários em `outputs/views/<view>` e escolhe a melhor reconstrução com base em Chamfer L1.
+- O preset do Flux foi trocado para `Comfy-Org/flux1-schnell-fp8` em 640×1280 com offload sequencial e slicing de atenção/VAE, reduzindo o pico de VRAM na RTX 3060 sem desabilitar ControlNet.
+- O relatório consolidado (`summary.json` + `runs_report.json`) registra métricas por vista e copia o melhor bundle/mesh para a raiz de `--output`.
+
 #### 5. Integração de utilidades
 - [ ] Criar helpers para gerir diretórios temporários (`TMP_DIR`, `OUT_DIR`) sem depender do `pipeline.utils`.
 - [ ] Implementar validações de entrada/saída (existência de arquivos, espaço em disco, permissões) antes de cada fase.
