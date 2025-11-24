@@ -128,7 +128,7 @@ from kiss3d_utils_local import (
 from kiss3d_wrapper_local import init_wrapper_from_config, run_image_to_3d
 
 os.environ.setdefault("XFORMERS_FORCE_DISABLE_TRITON", "1")
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+# expandable_segments não suportado no Windows - removido para evitar warnings
 
 DATASET_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp")
 

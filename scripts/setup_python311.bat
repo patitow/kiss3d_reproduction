@@ -109,11 +109,11 @@ if not exist "%TORCH_CACHE_DIR%" (
 
 call :EnsureEnvVar HF_HOME "%HF_CACHE_DIR%"
 call :EnsureEnvVar HUGGINGFACE_HUB_CACHE "%HF_CACHE_DIR%\hub"
-call :EnsureEnvVar TRANSFORMERS_CACHE "%HF_CACHE_DIR%\transformers"
+REM TRANSFORMERS_CACHE deprecated - usar apenas HF_HOME
 call :EnsureEnvVar DIFFUSERS_CACHE "%HF_CACHE_DIR%\diffusers"
 call :EnsureEnvVar TORCH_HOME "%TORCH_CACHE_DIR%"
 call :EnsureEnvVar XFORMERS_FORCE_DISABLE_TRITON "1"
-call :EnsureEnvVar PYTORCH_CUDA_ALLOC_CONF "expandable_segments:True"
+REM expandable_segments não suportado no Windows - removido para evitar warnings
 
 REM Gerar script de ativacao rapida com variaveis de ambiente
 (
@@ -131,7 +131,7 @@ REM Gerar script de ativacao rapida com variaveis de ambiente
     echo set "CACHE_ROOT=%%PROJECT_ROOT%%\.cache"
     echo set "HF_HOME=%%CACHE_ROOT%%\huggingface"
     echo set "HUGGINGFACE_HUB_CACHE=%%HF_HOME%%\hub"
-    echo set "TRANSFORMERS_CACHE=%%HF_HOME%%\transformers"
+    REM TRANSFORMERS_CACHE deprecated - usar apenas HF_HOME
     echo set "DIFFUSERS_CACHE=%%HF_HOME%%\diffusers"
     echo set "TORCH_HOME=%%CACHE_ROOT%%\torch"
     echo if not exist "%%HF_HOME%%" mkdir "%%HF_HOME%%"

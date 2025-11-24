@@ -208,6 +208,15 @@ class kiss3d_wrapper(object):
     def del_llm_model(self):
         if self.llm_model is not None:
             try:
+                # Convert to float32 before moving to CPU to avoid float16 warnings
+                if hasattr(self.llm_model, 'dtype'):
+                    model_dtype = getattr(self.llm_model, 'dtype', None)
+                    if model_dtype in [torch.float16, torch.bfloat16]:
+                        # Try to convert, but some models don't support it
+                        try:
+                            self.llm_model = self.llm_model.to(torch.float32)
+                        except Exception:
+                            pass  # If conversion fails, just move to CPU anyway
                 self.llm_model.to("cpu")
             except Exception:
                 pass
@@ -218,6 +227,14 @@ class kiss3d_wrapper(object):
     def release_text_models(self):
         if self.caption_model is not None:
             try:
+                # Convert to float32 before moving to CPU to avoid float16 warnings
+                if hasattr(self.caption_model, 'dtype'):
+                    model_dtype = getattr(self.caption_model, 'dtype', None)
+                    if model_dtype in [torch.float16, torch.bfloat16]:
+                        try:
+                            self.caption_model = self.caption_model.to(torch.float32)
+                        except Exception:
+                            pass
                 self.caption_model.to("cpu")
             except Exception:
                 pass
@@ -227,22 +244,29 @@ class kiss3d_wrapper(object):
     def offload_multiview_pipeline(self):
         if self.multiview_pipeline is not None:
             try:
-                self.multiview_pipeline.to("cpu")
+                # Don't move float16 pipelines to CPU - they should use CPU offload
+                pipeline_dtype = getattr(self.multiview_pipeline, 'dtype', None)
+                if pipeline_dtype == torch.float16:
+                    # Use CPU offload if available, otherwise skip
+                    if hasattr(self.multiview_pipeline, 'enable_model_cpu_offload'):
+                        self.multiview_pipeline.enable_model_cpu_offload()
+                    else:
+                        logger.warning("Multiview pipeline is float16, skipping CPU move to avoid warnings")
+                else:
+                    self.multiview_pipeline.to("cpu")
             except Exception:
                 pass
         _empty_cuda_cache()
 
     def offload_flux_pipelines(self):
+        # Flux pipelines already use CPU offload, don't move them directly
+        # They are managed by enable_sequential_cpu_offload()
         if self.flux_pipeline is not None:
-            try:
-                self.flux_pipeline.to("cpu")
-            except Exception:
-                pass
+            # Just clear cache, pipeline is already offloaded
+            pass
         if self.flux_redux_pipeline is not None:
-            try:
-                self.flux_redux_pipeline.to("cpu")
-            except Exception:
-                pass
+            # Just clear cache, pipeline is already offloaded
+            pass
         _empty_cuda_cache()
 
     def generate_multiview(self, image, seed=None, num_inference_steps=None):
@@ -605,7 +629,7 @@ class kiss3d_wrapper(object):
         
         # Gerar máscara de background
         recon_device = self.config["reconstruction"].get("device", "cpu")
-        multi_view_mask = get_background(normal_multi_view.unsqueeze(0)).to(recon_device).squeeze(0)
+        multi_view_mask = get_background(normal_multi_view).to(recon_device)
         rgb_multi_view = rgb_multi_view.to(recon_device) * multi_view_mask + (1 - multi_view_mask)
 
         vertices, faces = [], []
@@ -719,6 +743,9 @@ def init_wrapper_from_config(
 
     def _load_flux_pipeline(model_id: str):
         if model_id.endswith("safetensors"):
+            # Verificar se arquivo existe
+            if not os.path.exists(model_id):
+                raise FileNotFoundError(f"Arquivo do modelo não encontrado: {model_id}")
             return FluxImg2ImgPipeline.from_single_file(
                 model_id,
                 torch_dtype=dtype_[flux_dtype],
@@ -729,8 +756,24 @@ def init_wrapper_from_config(
         )
 
     try:
-        flux_pipe = _load_flux_pipeline(flux_base_model_pth)
-    except EnvironmentError as exc:
+        # Validar se o caminho do modelo fp8 existe antes de tentar carregar
+        if flux_base_model_pth and flux_base_model_pth.endswith("safetensors"):
+            if not os.path.exists(flux_base_model_pth):
+                logger.warning(
+                    "Arquivo do modelo Flux fp8 não encontrado em %s. Tentando fallback.",
+                    flux_base_model_pth,
+                )
+                if flux_fallback_model:
+                    flux_pipe = _load_flux_pipeline(flux_fallback_model)
+                else:
+                    raise FileNotFoundError(
+                        f"Modelo Flux fp8 não encontrado e nenhum fallback configurado: {flux_base_model_pth}"
+                    )
+            else:
+                flux_pipe = _load_flux_pipeline(flux_base_model_pth)
+        else:
+            flux_pipe = _load_flux_pipeline(flux_base_model_pth)
+    except (EnvironmentError, FileNotFoundError, OSError) as exc:
         if flux_fallback_model and flux_fallback_model != flux_base_model_pth:
             logger.warning(
                 "Falha ao carregar %s (%s). Tentando fallback %s.",
@@ -821,11 +864,23 @@ def init_wrapper_from_config(
         if isinstance(multiview_device, str) and multiview_device.startswith("cuda")
         else torch.float32
     )
-    multiview_pipeline = DiffusionPipeline.from_pretrained(
-        config_["multiview"]["base_model"],
-        custom_pipeline=config_["multiview"]["custom_pipeline"],
-        torch_dtype=mv_dtype,
-    )
+    try:
+        multiview_pipeline = DiffusionPipeline.from_pretrained(
+            config_["multiview"]["base_model"],
+            custom_pipeline=config_["multiview"]["custom_pipeline"],
+            torch_dtype=mv_dtype,
+            use_safetensors=True,  # Forçar uso de safetensors quando disponível
+        )
+    except Exception as e:
+        logger.warning(
+            "Falha ao carregar Zero123++ com safetensors. Tentando sem safetensors: %s", e
+        )
+        multiview_pipeline = DiffusionPipeline.from_pretrained(
+            config_["multiview"]["base_model"],
+            custom_pipeline=config_["multiview"]["custom_pipeline"],
+            torch_dtype=mv_dtype,
+            use_safetensors=False,  # Fallback para pickle se safetensors não disponível
+        )
     multiview_pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
         multiview_pipeline.scheduler.config, timestep_spacing="trailing"
     )
@@ -833,7 +888,7 @@ def init_wrapper_from_config(
     unet_ckpt_path = config_["multiview"].get("unet", None)
     if not os.path.exists(unet_ckpt_path):
         unet_ckpt_path = hf_hub_download(repo_id="LTT/Kiss3DGen", filename="flexgen.ckpt", repo_type="model")
-    state_dict = torch.load(unet_ckpt_path, map_location="cpu")
+    state_dict = torch.load(unet_ckpt_path, map_location="cpu", weights_only=True)
     multiview_pipeline.unet.load_state_dict(state_dict, strict=True)
 
     multiview_pipeline.to(multiview_device)
@@ -861,7 +916,7 @@ def init_wrapper_from_config(
     model_ckpt_path = config_["reconstruction"]["base_model"]
     if not os.path.exists(model_ckpt_path):
         model_ckpt_path = hf_hub_download(repo_id="LTT/PRM", filename="final_ckpt.ckpt", repo_type="model")
-    state_dict = torch.load(model_ckpt_path, map_location="cpu")["state_dict"]
+    state_dict = torch.load(model_ckpt_path, map_location="cpu", weights_only=True)["state_dict"]
     state_dict = {k[14:]: v for k, v in state_dict.items() if k.startswith("lrm_generator.")}
     recon_model.load_state_dict(state_dict, strict=True)
     recon_model.to(recon_device)

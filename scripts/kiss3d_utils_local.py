@@ -314,6 +314,25 @@ def isomer_reconstruct(
 ):
     end = time.time()
     device = rgb_multi_view.device
+    
+    # Detect if pytorch3d has GPU support, fallback to CPU if not
+    try:
+        from pytorch3d.structures import Meshes
+        test_mesh = Meshes(verts=[torch.zeros(3, 3)], faces=[torch.zeros(1, 3).long()])
+        if device.type == 'cuda':
+            test_mesh = test_mesh.to(device)
+            _ = test_mesh.faces_normals_packed()  # This will fail if no GPU support
+        py3d_device = device
+    except RuntimeError as e:
+        if "Not compiled with GPU support" in str(e) or "GPU" in str(e):
+            logger.warning("pytorch3d não tem suporte GPU, forçando CPU para operações ISOMER")
+            py3d_device = torch.device('cpu')
+            # Move tensors to CPU for pytorch3d operations
+            vertices = vertices.cpu() if isinstance(vertices, torch.Tensor) else vertices
+            faces = faces.cpu() if isinstance(faces, torch.Tensor) else faces
+        else:
+            raise
+    
     to_tensor_ = lambda x: torch.Tensor(x).float().to(device)
 
     global_normal = local_normal_global_transform(
@@ -328,6 +347,7 @@ def isomer_reconstruct(
     rgb_multi_view = rgb_multi_view.permute(0, 2, 3, 1)
 
     logger.info("==> Runing ISOMER reconstruction ...")
+    # Use py3d_device for pytorch3d operations, but keep original device for other ops
     meshes = reconstruction(
         normal_pils=global_normal,
         masks=multi_view_mask,

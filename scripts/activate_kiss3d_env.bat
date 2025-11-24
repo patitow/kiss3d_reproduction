@@ -27,11 +27,11 @@ if not exist "%TORCH_CACHE_DIR%" (
 
 set "HF_HOME=%HF_CACHE_DIR%"
 set "HUGGINGFACE_HUB_CACHE=%HF_CACHE_DIR%\hub"
-set "TRANSFORMERS_CACHE=%HF_CACHE_DIR%\transformers"
+REM TRANSFORMERS_CACHE deprecated - usar apenas HF_HOME
 set "DIFFUSERS_CACHE=%HF_CACHE_DIR%\diffusers"
 set "TORCH_HOME=%TORCH_CACHE_DIR%"
 set "XFORMERS_FORCE_DISABLE_TRITON=1"
-set "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
+REM expandable_segments não suportado no Windows - removido para evitar warnings
 
 if exist "%PROJECT_ROOT%\ninja.exe" (
     set "PATH=%PROJECT_ROOT%;%PATH%"
