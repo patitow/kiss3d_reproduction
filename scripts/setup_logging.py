@@ -42,6 +42,9 @@ def setup_complete_logging(
     
     log_file = log_dir / log_name
     
+    # Adicionar separador no início se o arquivo já existir (append mode)
+    append_separator = log_file.exists()
+    
     # Criar logger principal
     logger = logging.getLogger("kiss3dgen_pipeline")
     logger.setLevel(log_level)
@@ -49,8 +52,8 @@ def setup_complete_logging(
     # Limpar handlers existentes
     logger.handlers.clear()
     
-    # Handler para arquivo (completo)
-    file_handler = logging.FileHandler(log_file, encoding='utf-8', mode='w')
+    # Handler para arquivo (completo) - usar append para não perder logs antigos
+    file_handler = logging.FileHandler(log_file, encoding='utf-8', mode='a')
     file_handler.setLevel(log_level)
     file_formatter = logging.Formatter(
         '%(asctime)s | %(levelname)-8s | %(name)s | %(funcName)s:%(lineno)d | %(message)s',
@@ -58,6 +61,12 @@ def setup_complete_logging(
     )
     file_handler.setFormatter(file_formatter)
     logger.addHandler(file_handler)
+    
+    # Adicionar separador se estiver fazendo append
+    if append_separator:
+        logger.info("="*80)
+        logger.info(f"CONTINUAÇÃO DE LOG - Nova execução iniciada em {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info("="*80)
     
     # Handler para console (mais limpo)
     console_handler = logging.StreamHandler(sys.stdout)
@@ -142,21 +151,57 @@ def log_model_operation(logger: logging.Logger, operation: str, model_name: str,
     logger.info(msg)
 
 def log_memory_usage(logger: logging.Logger, label: str = "Memory check"):
-    """Log de uso de memória GPU"""
+    """Log de uso de memória GPU e CPU"""
     try:
         import torch
+        import psutil
+        import os
+        
+        # Memória GPU
+        gpu_info = ""
         if torch.cuda.is_available():
-            allocated = torch.cuda.memory_allocated() / 1024**2
-            reserved = torch.cuda.memory_reserved() / 1024**2
-            max_allocated = torch.cuda.max_memory_allocated() / 1024**2
-            logger.info(
-                f"[MEMORY] {label} | "
-                f"Allocated: {allocated:.1f} MB | "
-                f"Reserved: {reserved:.1f} MB | "
-                f"Max: {max_allocated:.1f} MB"
+            device = torch.cuda.current_device()
+            allocated = torch.cuda.memory_allocated(device) / 1024**3  # GB
+            reserved = torch.cuda.memory_reserved(device) / 1024**3  # GB
+            max_allocated = torch.cuda.max_memory_allocated(device) / 1024**3  # GB
+            total_memory = torch.cuda.get_device_properties(device).total_memory / 1024**3  # GB
+            free = total_memory - reserved
+            gpu_info = (
+                f"GPU: Allocated={allocated:.2f}GB, Reserved={reserved:.2f}GB, "
+                f"Max={max_allocated:.2f}GB, Free={free:.2f}GB, Total={total_memory:.2f}GB"
             )
-            # Reset max memory counter
-            torch.cuda.reset_peak_memory_stats()
+        
+        # Memória CPU/RAM
+        process = psutil.Process(os.getpid())
+        ram_info = process.memory_info()
+        ram_used_gb = ram_info.rss / 1024**3  # GB
+        ram_percent = process.memory_percent()
+        system_memory = psutil.virtual_memory()
+        ram_total_gb = system_memory.total / 1024**3  # GB
+        ram_available_gb = system_memory.available / 1024**3  # GB
+        
+        cpu_info = (
+            f"RAM: Process={ram_used_gb:.2f}GB ({ram_percent:.1f}%), "
+            f"System={ram_available_gb:.2f}GB/{ram_total_gb:.2f}GB available"
+        )
+        
+        logger.info(f"[MEMORY] {label} | {gpu_info} | {cpu_info}")
+        
+    except ImportError:
+        # Fallback se psutil não estiver disponível
+        try:
+            import torch
+            if torch.cuda.is_available():
+                device = torch.cuda.current_device()
+                allocated = torch.cuda.memory_allocated(device) / 1024**3  # GB
+                reserved = torch.cuda.memory_reserved(device) / 1024**3  # GB
+                total_memory = torch.cuda.get_device_properties(device).total_memory / 1024**3  # GB
+                logger.info(
+                    f"[MEMORY] {label} | "
+                    f"GPU: Allocated={allocated:.2f}GB, Reserved={reserved:.2f}GB, Total={total_memory:.2f}GB"
+                )
+        except Exception as e:
+            logger.warning(f"[MEMORY] Erro ao verificar memória: {e}")
     except Exception as e:
         logger.warning(f"[MEMORY] Erro ao verificar memória: {e}")
 

@@ -327,8 +327,29 @@ def isomer_reconstruct(
     end = time.time()
     device = rgb_multi_view.device
     
-    # Use GPU device for pytorch3d operations (no CPU fallback)
-    py3d_device = device
+    # Verificar se pytorch3d tem suporte GPU
+    try:
+        from pytorch3d.structures import Meshes
+        test_mesh = Meshes(verts=[torch.zeros(1, 3)], faces=[torch.zeros(1, 3, dtype=torch.long)])
+        if device.type == "cuda":
+            try:
+                test_mesh = test_mesh.to(device)
+                _ = test_mesh.faces_normals_packed()  # Testar operação que requer GPU
+                py3d_has_gpu = True
+            except RuntimeError as e:
+                if "Not compiled with GPU support" in str(e):
+                    py3d_has_gpu = False
+                    logger.warning("[ISOMER] pytorch3d não tem suporte GPU. Usando CPU para operações pytorch3d.")
+                else:
+                    raise
+        else:
+            py3d_has_gpu = False
+    except Exception as e:
+        logger.warning(f"[ISOMER] Erro ao verificar suporte GPU do pytorch3d: {e}. Usando CPU.")
+        py3d_has_gpu = False
+    
+    # Usar CPU para pytorch3d se não tiver suporte GPU
+    py3d_device = "cpu" if not py3d_has_gpu and device.type == "cuda" else device
     
     to_tensor_ = lambda x: torch.Tensor(x).float().to(device)
 
@@ -377,19 +398,46 @@ def isomer_reconstruct(
         m, p, apply_sRGB_to_LinearRGB=True, use_uv_texture=True, texture_resolution=2048
     )
     
+    # Mover meshes para CPU se pytorch3d não tiver suporte GPU
+    if py3d_device == "cpu" and device.type == "cuda":
+        logger.info("[ISOMER] Movendo meshes para CPU para projeção (pytorch3d sem suporte GPU)")
+        meshes = meshes.to("cpu")
+        projection_device = "cpu"
+    else:
+        projection_device = device
+    
     try:
         save_glb_addr = projection(
             meshes,
-            masks=multi_view_mask_proj.to(device),
-            images=rgb_multi_view.to(device),
-            azimuths=to_tensor_(azimuths),
-            elevations=to_tensor_(elevations),
-            weights=to_tensor_(color_weights),
+            masks=multi_view_mask_proj.to(projection_device),
+            images=rgb_multi_view.to(projection_device),
+            azimuths=to_tensor_(azimuths).to(projection_device),
+            elevations=to_tensor_(elevations).to(projection_device),
+            weights=to_tensor_(color_weights).to(projection_device),
             fov=30,
             radius=radius,
             save_dir=TMP_DIR,
             save_addrs=save_paths,
         )
+    except RuntimeError as e:
+        if "Not compiled with GPU support" in str(e) or "CUDA" in str(e):
+            logger.warning(f"[ISOMER] Erro GPU detectado: {e}. Tentando com CPU...")
+            # Tentar novamente com CPU
+            meshes = meshes.to("cpu")
+            save_glb_addr = projection(
+                meshes,
+                masks=multi_view_mask_proj.to("cpu"),
+                images=rgb_multi_view.to("cpu"),
+                azimuths=to_tensor_(azimuths).to("cpu"),
+                elevations=to_tensor_(elevations).to("cpu"),
+                weights=to_tensor_(color_weights).to("cpu"),
+                fov=30,
+                radius=radius,
+                save_dir=TMP_DIR,
+                save_addrs=save_paths,
+            )
+        else:
+            raise
     finally:
         # Restaurar função original
         isomer_utils.save_py3dmesh_with_trimesh_fast = original_save

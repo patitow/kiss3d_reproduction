@@ -55,60 +55,129 @@ if not ninja_found:
             os.environ["PATH"] = str(scripts_path) + os.pathsep + current_path
             print(f"[INFO] Scripts adicionado ao PATH: {scripts_path}")
 
-# Configurar CUDA_HOME se nao estiver definido
-if "CUDA_HOME" not in os.environ and "CUDA_PATH" not in os.environ:
-    cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
-    
-    if not cuda_home:
-        try:
-            import torch
-            cuda_version = torch.version.cuda
-            if cuda_version:
-                cuda_base = "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA"
-                possible_cuda_paths = []
-                
-                if os.path.exists(cuda_base):
-                    for item in os.listdir(cuda_base):
-                        cuda_path = os.path.join(cuda_base, item)
-                        if os.path.isdir(cuda_path) and item.startswith("v"):
-                            possible_cuda_paths.append(cuda_path)
-                
-                if cuda_version:
-                    version_parts = cuda_version.split(".")
-                    if len(version_parts) >= 2:
-                        version_major_minor = f"{version_parts[0]}.{version_parts[1]}"
-                        specific_path = os.path.join(cuda_base, f"v{version_major_minor}")
-                        if os.path.exists(specific_path) and specific_path not in possible_cuda_paths:
-                            possible_cuda_paths.insert(0, specific_path)
-                
-                cuda_found = False
-                for cuda_path in possible_cuda_paths:
-                    if os.path.exists(cuda_path) and os.path.exists(os.path.join(cuda_path, "bin", "nvcc.exe")):
-                        os.environ["CUDA_HOME"] = cuda_path
-                        os.environ["CUDA_PATH"] = cuda_path
-                        print(f"[INFO] CUDA_HOME configurado: {cuda_path}")
-                        cuda_found = True
-                        break
-                
-                if not cuda_found:
-                    print("[AVISO] CUDA_HOME nao encontrado automaticamente")
-                    default_cuda = "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.1"
-                    if os.path.exists(default_cuda):
-                        os.environ["CUDA_HOME"] = default_cuda
-                        os.environ["CUDA_PATH"] = default_cuda
-                        print(f"[INFO] CUDA_HOME configurado para caminho padrao: {default_cuda}")
-        except Exception as e:
-            print(f"[AVISO] Erro ao configurar CUDA_HOME: {e}")
+# Configurar CUDA_HOME e PATH - CRÍTICO: Deve ser feito ANTES de qualquer import do torch
+# Priorizar CUDA 12.1+ para compatibilidade com VS 2019/2022
+cuda_base = "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA"
+preferred_versions = ["v12.4", "v12.3", "v12.2", "v12.1", "v12.0"]  # Versões compatíveis com VS 2019/2022
 
-# Adicionar CUDA bin ao PATH se CUDA_HOME estiver configurado
 cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
-if cuda_home:
-    cuda_bin = os.path.join(cuda_home, "bin")
-    if os.path.exists(cuda_bin):
-        current_path = os.environ.get("PATH", "")
-        if cuda_bin not in current_path:
-            os.environ["PATH"] = cuda_bin + os.pathsep + current_path
-            print(f"[INFO] CUDA bin adicionado ao PATH: {cuda_bin}")
+cuda_found = False
+
+# Se CUDA_HOME já está configurado, verificar se é uma versão preferida
+if cuda_home and os.path.exists(cuda_home):
+    # Verificar se é uma versão preferida
+    for version in preferred_versions:
+        if version in cuda_home:
+            cuda_found = True
+            print(f"[INFO] CUDA_HOME já configurado com versão preferida: {cuda_home}")
+            break
+    
+    # Se não é versão preferida, tentar encontrar uma melhor
+    if not cuda_found:
+        print(f"[AVISO] CUDA_HOME atual ({cuda_home}) não é versão preferida. Procurando versão melhor...")
+
+if not cuda_found:
+    # Tentar versões preferidas primeiro (compatíveis com VS 2019/2022)
+    for version in preferred_versions:
+        cuda_path = os.path.join(cuda_base, version)
+        if os.path.exists(cuda_path) and os.path.exists(os.path.join(cuda_path, "bin", "nvcc.exe")):
+            os.environ["CUDA_HOME"] = cuda_path
+            os.environ["CUDA_PATH"] = cuda_path
+            print(f"[INFO] CUDA_HOME configurado para {version} (compatível com VS 2019/2022): {cuda_path}")
+            cuda_found = True
+            break
+    
+    # Se ainda não encontrou, procurar qualquer versão instalada
+    if not cuda_found and os.path.exists(cuda_base):
+        for item in sorted(os.listdir(cuda_base), reverse=True):
+            cuda_path = os.path.join(cuda_base, item)
+            if os.path.isdir(cuda_path) and item.startswith("v") and os.path.exists(os.path.join(cuda_path, "bin", "nvcc.exe")):
+                os.environ["CUDA_HOME"] = cuda_path
+                os.environ["CUDA_PATH"] = cuda_path
+                print(f"[INFO] CUDA_HOME configurado (versão encontrada): {cuda_path}")
+                cuda_found = True
+                break
+
+if not cuda_found:
+    print("[AVISO] CUDA_HOME nao encontrado. Compilação pode falhar.")
+else:
+    # IMPORTANTE: Adicionar CUDA bin ao INÍCIO do PATH para garantir que o nvcc correto seja usado
+    cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
+    if cuda_home:
+        cuda_bin = os.path.join(cuda_home, "bin")
+        if os.path.exists(cuda_bin):
+            current_path = os.environ.get("PATH", "")
+            # Remover qualquer outro CUDA do PATH primeiro
+            path_parts = [p for p in current_path.split(os.pathsep) if "CUDA" not in p or cuda_bin in p]
+            # Adicionar CUDA bin no INÍCIO do PATH
+            os.environ["PATH"] = cuda_bin + os.pathsep + os.pathsep.join(path_parts)
+            print(f"[INFO] CUDA bin adicionado ao INÍCIO do PATH: {cuda_bin}")
+            
+            # Verificar qual nvcc está sendo usado
+            try:
+                import subprocess
+                nvcc_result = subprocess.run(["nvcc", "--version"], capture_output=True, text=True, timeout=5)
+                if nvcc_result.returncode == 0:
+                    nvcc_output = nvcc_result.stdout
+                    if cuda_home in nvcc_output or os.path.basename(cuda_home) in nvcc_output:
+                        print(f"[OK] nvcc correto detectado: {nvcc_output.split(chr(10))[0] if chr(10) in nvcc_output else nvcc_output[:100]}")
+                    else:
+                        print(f"[AVISO] nvcc pode não ser da versão esperada. Output: {nvcc_output[:200]}")
+            except Exception as e:
+                print(f"[AVISO] Não foi possível verificar versão do nvcc: {e}")
+
+# Configurar Visual Studio - PRIORIZAR VS 2019 (compatível com CUDA 12.1)
+vs_base_paths = [
+    "C:\\Program Files (x86)\\Microsoft Visual Studio",
+    "C:\\Program Files\\Microsoft Visual Studio"
+]
+
+vs_found = False
+vs_preferred = ["2019"]  # VS 2019 é OBRIGATÓRIO para CUDA 12.1 - melhor compatibilidade
+
+for vs_base in vs_base_paths:
+    if os.path.exists(vs_base):
+        for vs_version in vs_preferred:
+            vs_path = os.path.join(vs_base, vs_version)
+            if os.path.exists(vs_path):
+                # Procurar por cl.exe no caminho típico
+                for edition in ["Community", "Professional", "Enterprise", "BuildTools"]:
+                    vc_tools = os.path.join(vs_path, edition, "VC", "Tools", "MSVC")
+                    if os.path.exists(vc_tools):
+                        # Procurar versão mais recente do MSVC
+                        try:
+                            msvc_versions = sorted([d for d in os.listdir(vc_tools) if os.path.isdir(os.path.join(vc_tools, d))], reverse=True)
+                            if msvc_versions:
+                                cl_path = os.path.join(vc_tools, msvc_versions[0], "bin", "Hostx64", "x64", "cl.exe")
+                                if os.path.exists(cl_path):
+                                    cl_dir = os.path.dirname(cl_path)
+                                    current_path = os.environ.get("PATH", "")
+                                    # Adicionar no início do PATH
+                                    if cl_dir not in current_path:
+                                        os.environ["PATH"] = cl_dir + os.pathsep + current_path
+                                        print(f"[INFO] Visual Studio {vs_version} encontrado e adicionado ao PATH: {cl_dir}")
+                                        vs_found = True
+                                        break
+                        except Exception as e:
+                            print(f"[AVISO] Erro ao procurar MSVC em {vc_tools}: {e}")
+                if vs_found:
+                    break
+        if vs_found:
+            break
+
+if not vs_found:
+    print("[AVISO] Visual Studio não encontrado. Compilação pode falhar.")
+
+# Configurar TORCH_CUDA_ARCH_LIST - deixar vazio para auto-detectar, mas garantir que não tenha valores antigos
+# O PyTorch vai detectar automaticamente a arquitetura da GPU disponível
+if "TORCH_CUDA_ARCH_LIST" in os.environ:
+    old_arch = os.environ["TORCH_CUDA_ARCH_LIST"]
+    if old_arch and old_arch.strip():
+        print(f"[INFO] TORCH_CUDA_ARCH_LIST estava configurado como '{old_arch}', limpando para auto-detecção")
+    os.environ["TORCH_CUDA_ARCH_LIST"] = ""  # PyTorch vai auto-detectar
+else:
+    os.environ["TORCH_CUDA_ARCH_LIST"] = ""  # PyTorch vai auto-detectar
+    print("[INFO] TORCH_CUDA_ARCH_LIST configurado para auto-detecção")
 
 # Adicionar paths - IMPORTANTE: Kiss3DGen precisa estar no path
 kiss3dgen_path = project_root / "Kiss3DGen"
@@ -333,6 +402,12 @@ def main():
         capture_stdout=True
     )
     
+    # Mostrar claramente onde o log está sendo salvo
+    print("=" * 80)
+    print(f"LOGS: {log_file}")
+    print("=" * 80)
+    pipeline_logger.info(f"Logs sendo salvos em: {log_file}")
+    
     # Redirecionar print para logger também
     import builtins
     original_print = builtins.print
@@ -393,6 +468,7 @@ def main():
     
     # Inicializar wrapper do Kiss3DGen
     print("\n[1/4] Inicializando pipeline Kiss3DGen...")
+    k3d_wrapper = None
     try:
         k3d_wrapper = init_wrapper_from_config(
             args.config,
@@ -406,9 +482,26 @@ def main():
             args.enable_redux = False
         print("[OK] Pipeline inicializado")
     except Exception as e:
-        print(f"[ERRO] Falha ao inicializar pipeline: {e}")
+        error_msg = f"Falha ao inicializar pipeline: {e}"
+        print(f"[ERRO] {error_msg}")
+        pipeline_logger.error(error_msg, exc_info=True)
         import traceback
         traceback.print_exc()
+        # Salvar erro no histórico antes de retornar
+        error_record = {
+            "label": "initialization",
+            "input": str(args.input) if args.input else "N/A",
+            "index": 0,
+            "success": False,
+            "error": str(e),
+            "metrics": None,
+        }
+        history_path = Path(args.output) / "runs_report.json"
+        try:
+            history_path.write_text(json.dumps([error_record], indent=2, default=str), encoding="utf-8")
+            print(f"[INFO] Erro salvo em: {history_path}")
+        except:
+            pass
         return
     
     print("\n[2/4] Preparando execuções por vista...")
@@ -417,6 +510,14 @@ def main():
     views_root.mkdir(parents=True, exist_ok=True)
     history: List[Dict] = []
     job_results: List[Dict] = []
+    
+    # Garantir que o diretório de output existe
+    history_path = Path(args.output) / "runs_report.json"
+    summary_path = Path(args.output) / "summary.json"
+    
+    # Salvar arquivo inicial vazio para garantir que existe
+    history_path.write_text(json.dumps([], indent=2), encoding="utf-8")
+    print(f"[INFO] Arquivo de histórico criado: {history_path}")
 
     for idx, job in enumerate(selected_inputs, start=1):
         print(f"\n[3/4] Executando vista {job['label']} ({idx}/{len(selected_inputs)})...")
@@ -491,9 +592,22 @@ def main():
         )
         job_record["metrics"] = metrics
         history.append(job_record)
+        
+        # Salvar histórico incrementalmente após cada job
+        try:
+            history_path.write_text(json.dumps(history, indent=2, default=str), encoding="utf-8")
+            pipeline_logger.debug(f"Histórico atualizado: {len(history)} registros")
+        except Exception as e:
+            pipeline_logger.error(f"Erro ao salvar histórico: {e}")
 
-    history_path = Path(args.output) / "runs_report.json"
-    history_path.write_text(json.dumps(history, indent=2, default=str), encoding="utf-8")
+    # Salvar histórico final
+    try:
+        history_path.write_text(json.dumps(history, indent=2, default=str), encoding="utf-8")
+        print(f"[OK] Histórico completo salvo em: {history_path}")
+        pipeline_logger.info(f"Histórico completo salvo: {history_path}")
+    except Exception as e:
+        print(f"[ERRO] Falha ao salvar histórico: {e}")
+        pipeline_logger.error(f"Falha ao salvar histórico: {e}")
 
     if not job_results:
         print("[ERRO] Nenhuma vista foi processada com sucesso. Consulte runs_report.json para detalhes.")
@@ -544,12 +658,16 @@ def main():
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
     print(f"\n[OK] Resultados salvos em: {args.output}")
+    print(f"  - Histórico: {history_path}")
+    print(f"  - Resumo: {summary_path}")
+    print(f"  - Logs: {log_file}")
     print(f"Melhor vista: {best_result['label']} -> {best_result['bundle']}")
     if final_metrics_path:
         print(f"Métricas finais: {final_metrics_path}")
     print("\n" + "=" * 60)
     print("Pipeline concluido!")
     print("=" * 60)
+    pipeline_logger.info(f"Pipeline concluído. Resultados em: {args.output}")
 
 
 if __name__ == "__main__":
