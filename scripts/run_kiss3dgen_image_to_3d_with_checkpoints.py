@@ -1,0 +1,441 @@
+#!/usr/bin/env python3
+"""
+Pipeline IMAGE TO 3D - Kiss3DGen com Sistema de Checkpoints
+Salva resultados intermediários em cada etapa para diagnóstico
+"""
+
+import os
+import sys
+from pathlib import Path
+
+# CRÍTICO: Configurar VS 2019 e CUDA ANTES de qualquer importação do PyTorch
+project_root = Path(__file__).parent.parent
+
+# Configurar CUDA_HOME - PRIORIZAR CUDA 12.1 (compatível com PyTorch 2.5.1+cu121)
+cuda_base = "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA"
+cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
+
+# Verificar se CUDA_HOME atual é compatível com PyTorch (12.1+)
+preferred_versions = ["v12.1", "v12.2", "v12.3", "v12.4", "v12.0"]
+cuda_found = False
+
+# Se CUDA_HOME já está configurado e é versão preferida, usar
+if cuda_home and os.path.exists(cuda_home):
+    for version in preferred_versions:
+        if version in cuda_home:
+            cuda_found = True
+            print(f"[INFO] CUDA_HOME já configurado com versão preferida: {cuda_home}")
+            break
+
+# Se não encontrou versão preferida, procurar
+if not cuda_found and os.path.exists(cuda_base):
+    # Primeiro tentar versões preferidas (12.x)
+    for version in preferred_versions:
+        cuda_path = os.path.join(cuda_base, version)
+        if os.path.exists(cuda_path) and os.path.exists(os.path.join(cuda_path, "bin", "nvcc.exe")):
+            os.environ["CUDA_HOME"] = cuda_path
+            os.environ["CUDA_PATH"] = cuda_path
+            print(f"[INFO] CUDA_HOME configurado para {version} (compatível com PyTorch): {cuda_path}")
+            cuda_found = True
+            break
+    
+    # Se não encontrou 12.x, usar qualquer CUDA disponível
+    if not cuda_found:
+        for item in sorted(os.listdir(cuda_base), reverse=True):
+            cuda_path = os.path.join(cuda_base, item)
+            if os.path.isdir(cuda_path) and item.startswith("v") and os.path.exists(os.path.join(cuda_path, "bin", "nvcc.exe")):
+                os.environ["CUDA_HOME"] = cuda_path
+                os.environ["CUDA_PATH"] = cuda_path
+                print(f"[AVISO] CUDA_HOME configurado para {item} (pode não ser compatível com PyTorch): {cuda_path}")
+                print(f"[AVISO] PyTorch foi compilado com CUDA 12.1 - considere instalar CUDA 12.1")
+                break
+
+# Adicionar CUDA bin ao PATH
+cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
+if cuda_home:
+    cuda_bin = os.path.join(cuda_home, "bin")
+    if os.path.exists(cuda_bin):
+        current_path = os.environ.get("PATH", "")
+        path_parts = [p for p in current_path.split(os.pathsep) if "CUDA" not in p or cuda_bin in p]
+        os.environ["PATH"] = cuda_bin + os.pathsep + os.pathsep.join(path_parts)
+        print(f"[INFO] CUDA bin adicionado ao PATH: {cuda_bin}")
+
+# Configurar VS 2019 ANTES de qualquer importação
+vs_base_paths = [
+    "C:\\Program Files (x86)\\Microsoft Visual Studio",
+    "C:\\Program Files\\Microsoft Visual Studio"
+]
+
+vs_found = False
+vs_preferred = ["2019"]
+
+for vs_base in vs_base_paths:
+    if os.path.exists(vs_base):
+        for vs_version in vs_preferred:
+            vs_path = os.path.join(vs_base, vs_version)
+            if os.path.exists(vs_path):
+                for edition in ["BuildTools", "Community", "Professional", "Enterprise"]:
+                    vc_tools = os.path.join(vs_path, edition, "VC", "Tools", "MSVC")
+                    if os.path.exists(vc_tools):
+                        try:
+                            msvc_versions = sorted([d for d in os.listdir(vc_tools) if os.path.isdir(os.path.join(vc_tools, d))], reverse=True)
+                            if msvc_versions:
+                                cl_path = os.path.join(vc_tools, msvc_versions[0], "bin", "Hostx64", "x64", "cl.exe")
+                                if os.path.exists(cl_path):
+                                    cl_dir = os.path.dirname(cl_path)
+                                    current_path = os.environ.get("PATH", "")
+                                    path_parts = [p for p in current_path.split(os.pathsep) if "Visual Studio" not in p or "2019" in p]
+                                    if cl_dir not in path_parts:
+                                        os.environ["PATH"] = cl_dir + os.pathsep + os.pathsep.join(path_parts)
+                                    else:
+                                        path_parts = [p for p in path_parts if p != cl_dir]
+                                        os.environ["PATH"] = cl_dir + os.pathsep + os.pathsep.join(path_parts)
+                                    print(f"[INFO] VS 2019 configurado: {cl_dir}")
+                                    os.environ["DISTUTILS_USE_SDK"] = "1"
+                                    vs_found = True
+                                    break
+                        except Exception as e:
+                            pass
+                if vs_found:
+                    break
+        if vs_found:
+            break
+
+if not vs_found:
+    print("[AVISO] VS 2019 não encontrado. Compilação pode falhar.")
+
+# Agora importar o resto
+import json
+import shutil
+import argparse
+import logging
+import traceback
+from typing import Dict, Any, Optional, Tuple
+from datetime import datetime
+import torch
+from PIL import Image
+
+# Adicionar Kiss3DGen ao path
+sys.path.insert(0, str(project_root))
+sys.path.insert(0, str(project_root / "Kiss3DGen"))
+
+from scripts.kiss3d_wrapper_local import init_wrapper_from_config
+from scripts.kiss3d_utils_local import TMP_DIR
+
+# Configurar logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+class PipelineCheckpoint:
+    """Sistema de checkpointing para salvar resultados intermediários"""
+    
+    def __init__(self, output_dir: Path, job_name: str):
+        self.output_dir = Path(output_dir)
+        self.job_name = job_name
+        self.checkpoint_dir = self.output_dir / "checkpoints" / job_name
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        
+        self.status_file = self.checkpoint_dir / "status.json"
+        self.status = self._load_status()
+        
+    def _load_status(self) -> Dict[str, Any]:
+        """Carrega status anterior se existir"""
+        if self.status_file.exists():
+            try:
+                return json.loads(self.status_file.read_text(encoding='utf-8'))
+            except:
+                pass
+        return {
+            "job_name": self.job_name,
+            "started_at": datetime.now().isoformat(),
+            "stages": {
+                "initialization": {"status": "pending", "timestamp": None, "error": None},
+                "caption": {"status": "pending", "timestamp": None, "error": None, "result": None},
+                "multiview": {"status": "pending", "timestamp": None, "error": None, "result": None},
+                "bundle_3d": {"status": "pending", "timestamp": None, "error": None, "result": None},
+                "reconstruction": {"status": "pending", "timestamp": None, "error": None, "result": None},
+            },
+            "final_status": "in_progress"
+        }
+    
+    def save_status(self):
+        """Salva status atual"""
+        self.status_file.write_text(json.dumps(self.status, indent=2, ensure_ascii=False), encoding='utf-8')
+    
+    def mark_stage_start(self, stage: str):
+        """Marca início de uma etapa"""
+        if stage in self.status["stages"]:
+            self.status["stages"][stage]["status"] = "in_progress"
+            self.status["stages"][stage]["timestamp"] = datetime.now().isoformat()
+            self.save_status()
+    
+    def mark_stage_success(self, stage: str, result_path: Optional[str] = None, metadata: Optional[Dict] = None):
+        """Marca sucesso de uma etapa"""
+        if stage in self.status["stages"]:
+            self.status["stages"][stage]["status"] = "completed"
+            self.status["stages"][stage]["timestamp"] = datetime.now().isoformat()
+            if result_path:
+                self.status["stages"][stage]["result"] = str(result_path)
+            if metadata:
+                self.status["stages"][stage]["metadata"] = metadata
+            self.save_status()
+            logger.info(f"[CHECKPOINT] Etapa '{stage}' concluída com sucesso")
+    
+    def mark_stage_error(self, stage: str, error: str, traceback_str: Optional[str] = None):
+        """Marca erro em uma etapa"""
+        if stage in self.status["stages"]:
+            self.status["stages"][stage]["status"] = "failed"
+            self.status["stages"][stage]["timestamp"] = datetime.now().isoformat()
+            self.status["stages"][stage]["error"] = str(error)
+            if traceback_str:
+                self.status["stages"][stage]["traceback"] = traceback_str
+            self.save_status()
+            logger.error(f"[CHECKPOINT] Etapa '{stage}' falhou: {error}")
+    
+    def save_file(self, stage: str, filename: str, source_path: Path) -> Path:
+        """Salva arquivo de uma etapa"""
+        stage_dir = self.checkpoint_dir / stage
+        stage_dir.mkdir(exist_ok=True)
+        dest_path = stage_dir / filename
+        if source_path.exists():
+            if source_path.is_file():
+                shutil.copy2(source_path, dest_path)
+            else:
+                shutil.copytree(source_path, dest_path, dirs_exist_ok=True)
+            logger.info(f"[CHECKPOINT] Arquivo salvo: {dest_path}")
+            return dest_path
+        else:
+            logger.warning(f"[CHECKPOINT] Arquivo não encontrado: {source_path}")
+            return None
+    
+    def get_failed_stages(self) -> list:
+        """Retorna lista de etapas que falharam"""
+        return [stage for stage, info in self.status["stages"].items() if info["status"] == "failed"]
+    
+    def get_completed_stages(self) -> list:
+        """Retorna lista de etapas completadas"""
+        return [stage for stage, info in self.status["stages"].items() if info["status"] == "completed"]
+
+
+def run_image_to_3d_with_checkpoints(
+    k3d_wrapper,
+    input_image_path: str,
+    checkpoint: PipelineCheckpoint,
+    enable_redux: bool = True,
+    use_mv_rgb: bool = True,
+    use_controlnet: bool = True,
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Executa pipeline com sistema de checkpoints
+    Retorna: (bundle_path, mesh_path)
+    """
+    from PIL import Image
+    
+    input_image_path = Path(input_image_path)
+    if not input_image_path.exists():
+        raise FileNotFoundError(f"Imagem não encontrada: {input_image_path}")
+    
+    # Seguir ordem do pipeline original: primeiro multiview, depois caption
+    from scripts.kiss3d_utils_local import preprocess_input_image
+    
+    input_image = preprocess_input_image(Image.open(input_image_path))
+    input_image.save(os.path.join(TMP_DIR, f"{k3d_wrapper.uuid}_input_image.png"))
+    
+    # Etapa 1: Multiview + Bundle 3D (gerados juntos)
+    checkpoint.mark_stage_start("multiview")
+    checkpoint.mark_stage_start("bundle_3d")
+    try:
+        logger.info("[ETAPA 1/4] Gerando multiview e bundle 3D...")
+        ref_3d_bundle_image, reference_save_path = k3d_wrapper.generate_reference_3D_bundle_image_zero123(
+            input_image,
+            use_mv_rgb=use_mv_rgb,
+            save_intermediate_results=True
+        )
+        
+        # Salvar multiview (gerado internamente)
+        mv_files = list(Path(TMP_DIR).glob(f"{k3d_wrapper.uuid}_mv_image.png"))
+        if mv_files:
+            mv_file = checkpoint.save_file("multiview", "multiview.png", mv_files[0])
+            logger.info(f"[OK] Multiview gerado: {mv_file}")
+            checkpoint.mark_stage_success("multiview", str(mv_file))
+        else:
+            logger.warning("[AVISO] Multiview não encontrado no TMP_DIR")
+            checkpoint.mark_stage_success("multiview", None)
+        
+        # Salvar bundle 3D
+        bundle_files = list(Path(TMP_DIR).glob(f"{k3d_wrapper.uuid}_ref_3d_bundle_image.png"))
+        if bundle_files:
+            bundle_file = checkpoint.save_file("bundle_3d", "bundle_3d.png", bundle_files[0])
+            logger.info(f"[OK] Bundle 3D gerado: {bundle_file}")
+            checkpoint.mark_stage_success("bundle_3d", str(bundle_file))
+        else:
+            logger.warning("[AVISO] Bundle 3D não encontrado no TMP_DIR")
+            checkpoint.mark_stage_success("bundle_3d", None)
+        
+        # Descarregar multiview pipeline para liberar VRAM
+        k3d_wrapper.offload_multiview_pipeline()
+    except Exception as e:
+        error_msg = f"Erro ao gerar multiview/bundle 3D: {e}"
+        checkpoint.mark_stage_error("multiview", error_msg, traceback.format_exc())
+        checkpoint.mark_stage_error("bundle_3d", error_msg, traceback.format_exc())
+        raise
+    
+    # Etapa 2: Caption
+    checkpoint.mark_stage_start("caption")
+    try:
+        logger.info("[ETAPA 2/4] Gerando caption...")
+        caption = k3d_wrapper.get_image_caption(input_image)
+        logger.info(f"[OK] Caption gerado: {caption[:100]}...")
+        
+        # Salvar caption
+        caption_file = checkpoint.checkpoint_dir / "caption" / "caption.txt"
+        caption_file.parent.mkdir(exist_ok=True)
+        caption_file.write_text(caption, encoding='utf-8')
+        checkpoint.mark_stage_success("caption", str(caption_file), {"caption_preview": caption[:200]})
+        
+        # Liberar modelos de texto
+        k3d_wrapper.release_text_models()
+    except Exception as e:
+        error_msg = f"Erro ao gerar caption: {e}"
+        checkpoint.mark_stage_error("caption", error_msg, traceback.format_exc())
+        raise
+    
+    # Etapa 3: Gerar bundle final com Flux (se necessário)
+    # Esta etapa é opcional e pode ser feita depois
+    
+    # Etapa 4: Reconstrução final (usando run_image_to_3d completo)
+    # Por enquanto, vamos usar a função original que já faz tudo
+    logger.info("[ETAPA 3/4] Pipeline completo em execução...")
+    logger.info("[INFO] Usando função run_image_to_3d original para reconstrução completa")
+    
+    # Importar função original
+    from scripts.kiss3d_utils_local import run_image_to_3d
+    
+    checkpoint.mark_stage_start("reconstruction")
+    try:
+        gen_save_path, recon_mesh_path = run_image_to_3d(
+            k3d_wrapper,
+            str(input_image_path),
+            enable_redux=enable_redux,
+            use_mv_rgb=use_mv_rgb,
+            use_controlnet=use_controlnet,
+        )
+        
+        # Salvar mesh final
+        if recon_mesh_path and Path(recon_mesh_path).exists():
+            mesh_file = checkpoint.save_file("reconstruction", Path(recon_mesh_path).name, Path(recon_mesh_path))
+            logger.info(f"[OK] Mesh reconstruído: {mesh_file}")
+            checkpoint.mark_stage_success("reconstruction", str(mesh_file))
+        else:
+            logger.warning("[AVISO] Mesh não encontrado")
+            checkpoint.mark_stage_success("reconstruction", None)
+        
+        return gen_save_path, recon_mesh_path
+    except Exception as e:
+        error_msg = f"Erro ao reconstruir mesh: {e}"
+        checkpoint.mark_stage_error("reconstruction", error_msg, traceback.format_exc())
+        raise
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Pipeline IMAGE TO 3D - Kiss3DGen com Checkpoints")
+    parser.add_argument("--input", type=str, required=True, help="Caminho da imagem de entrada")
+    parser.add_argument("--output", type=str, required=True, help="Diretório de saída")
+    parser.add_argument("--config", type=str, default="Kiss3DGen/pipeline/pipeline_config/default.yaml")
+    parser.add_argument("--fast-mode", action="store_true", help="Modo rápido")
+    parser.add_argument("--use-controlnet", action="store_true", help="Usar ControlNet")
+    parser.add_argument("--enable-redux", action="store_true", help="Habilitar Redux")
+    parser.add_argument("--use-mv-rgb", action="store_true", default=True, help="Usar RGB multiview")
+    
+    args = parser.parse_args()
+    
+    # Configurar paths
+    project_root = Path(__file__).parent.parent
+    input_path = Path(args.input)
+    if not input_path.is_absolute():
+        input_path = project_root / input_path
+    output_path = Path(args.output)
+    if not output_path.is_absolute():
+        output_path = project_root / output_path
+    
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    # Nome do job baseado na imagem
+    job_name = input_path.stem
+    
+    # Criar checkpoint
+    checkpoint = PipelineCheckpoint(output_path, job_name)
+    
+    logger.info("=" * 80)
+    logger.info("Pipeline IMAGE TO 3D - Kiss3DGen com Sistema de Checkpoints")
+    logger.info("=" * 80)
+    logger.info(f"Input: {input_path}")
+    logger.info(f"Output: {output_path}")
+    logger.info(f"Checkpoint dir: {checkpoint.checkpoint_dir}")
+    logger.info("=" * 80)
+    
+    # Etapa 0: Inicialização
+    checkpoint.mark_stage_start("initialization")
+    try:
+        logger.info("[ETAPA 0/4] Inicializando pipeline...")
+        config_path = Path(args.config)
+        if not config_path.is_absolute():
+            config_path = project_root / config_path
+        
+        k3d_wrapper = init_wrapper_from_config(str(config_path))
+        logger.info("[OK] Pipeline inicializado")
+        checkpoint.mark_stage_success("initialization")
+    except Exception as e:
+        error_msg = f"Erro ao inicializar pipeline: {e}"
+        checkpoint.mark_stage_error("initialization", error_msg, traceback.format_exc())
+        logger.error(error_msg)
+        sys.exit(1)
+    
+    # Executar pipeline
+    try:
+        gen_save_path, recon_mesh_path = run_image_to_3d_with_checkpoints(
+            k3d_wrapper,
+            str(input_path),
+            checkpoint,
+            enable_redux=args.enable_redux,
+            use_mv_rgb=args.use_mv_rgb,
+            use_controlnet=args.use_controlnet,
+        )
+        
+        # Atualizar status final
+        checkpoint.status["final_status"] = "completed"
+        checkpoint.status["completed_at"] = datetime.now().isoformat()
+        checkpoint.save_status()
+        
+        logger.info("=" * 80)
+        logger.info("Pipeline concluído com sucesso!")
+        logger.info(f"Bundle: {gen_save_path}")
+        logger.info(f"Mesh: {recon_mesh_path}")
+        logger.info(f"Checkpoints salvos em: {checkpoint.checkpoint_dir}")
+        logger.info("=" * 80)
+        
+    except Exception as e:
+        checkpoint.status["final_status"] = "failed"
+        checkpoint.status["failed_at"] = datetime.now().isoformat()
+        checkpoint.status["final_error"] = str(e)
+        checkpoint.save_status()
+        
+        failed_stages = checkpoint.get_failed_stages()
+        completed_stages = checkpoint.get_completed_stages()
+        
+        logger.error("=" * 80)
+        logger.error("Pipeline falhou!")
+        logger.error(f"Erro: {e}")
+        logger.error(f"Etapas completadas: {', '.join(completed_stages) if completed_stages else 'Nenhuma'}")
+        logger.error(f"Etapas falhadas: {', '.join(failed_stages) if failed_stages else 'Nenhuma'}")
+        logger.error(f"Checkpoints salvos em: {checkpoint.checkpoint_dir}")
+        logger.error("=" * 80)
+        
+        traceback.print_exc()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
+
