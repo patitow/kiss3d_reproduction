@@ -799,13 +799,41 @@ def init_wrapper_from_config(
     logger.info(f"[MODEL] Redux: {'carregar' if load_redux else 'não carregar'}")
 
     def _load_flux_pipeline(model_id: str):
-        if model_id.endswith("safetensors"):
+        if model_id.endswith("safetensors") or model_id.startswith("http"):
+            # Se for URL do HuggingFace, baixar o arquivo
+            if model_id.startswith("http"):
+                logger.info(f"[MODEL] Baixando modelo FLUX fp8 de: {model_id}")
+                try:
+                    # Extrair repo_id e filename da URL
+                    if "huggingface.co" in model_id:
+                        # Formato: https://huggingface.co/Comfy-Org/flux1-dev/resolve/main/flux1-dev-fp8.safetensors
+                        parts = model_id.split("/")
+                        repo_id = f"{parts[3]}/{parts[4]}"
+                        filename = parts[-1]
+                        logger.info(f"[MODEL] Repo: {repo_id}, Arquivo: {filename}")
+                        local_path = hf_hub_download(
+                            repo_id=repo_id,
+                            filename=filename,
+                            repo_type="model"
+                        )
+                        logger.info(f"[MODEL] Modelo baixado para: {local_path}")
+                        model_id = local_path
+                    else:
+                        raise ValueError(f"URL não suportada: {model_id}")
+                except Exception as e:
+                    logger.error(f"[MODEL] Erro ao baixar modelo: {e}")
+                    raise
+            
             # Verificar se arquivo existe
             if not os.path.exists(model_id):
                 raise FileNotFoundError(f"Arquivo do modelo não encontrado: {model_id}")
+            
+            # Usar bfloat16 para fp8 safetensors (fp8 não é suportado diretamente pelo PyTorch em todos os casos)
+            load_dtype = torch.bfloat16 if flux_dtype == "fp8" else dtype_[flux_dtype]
+            logger.info(f"[MODEL] Carregando modelo FLUX de arquivo safetensors com dtype: {load_dtype}")
             return FluxImg2ImgPipeline.from_single_file(
                 model_id,
-                torch_dtype=dtype_[flux_dtype],
+                torch_dtype=load_dtype,
             )
         return FluxImg2ImgPipeline.from_pretrained(
             model_id,
@@ -815,8 +843,12 @@ def init_wrapper_from_config(
     try:
         logger.info(f"[MODEL] Carregando Flux base model: {flux_base_model_pth}")
         log_memory_usage(logger, "Antes de carregar Flux base")
+        # Se for URL, tentar baixar primeiro
+        if flux_base_model_pth and flux_base_model_pth.startswith("http"):
+            logger.info(f"[MODEL] Detectada URL do modelo, tentando baixar...")
+            flux_pipe = _load_flux_pipeline(flux_base_model_pth)
         # Validar se o caminho do modelo fp8 existe antes de tentar carregar
-        if flux_base_model_pth and flux_base_model_pth.endswith("safetensors"):
+        elif flux_base_model_pth and flux_base_model_pth.endswith("safetensors"):
             if not os.path.exists(flux_base_model_pth):
                 logger.warning(
                     "Arquivo do modelo Flux fp8 não encontrado em %s. Tentando fallback.",

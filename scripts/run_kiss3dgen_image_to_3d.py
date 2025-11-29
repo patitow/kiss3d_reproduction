@@ -204,7 +204,7 @@ def main():
         action="store_true",
         help="Desabilita refinamento de prompt com LLM (economiza VRAM/RAM).",
     )
-    parser.add_argument("--dataset-item", type=str, help="Nome do item em data/raw/gazebo_dataset")
+    parser.add_argument("--dataset-item", type=str, default="OXO_Cookie_Spatula", help="Nome do item em data/raw/gazebo_dataset (padrão: OXO_Cookie_Spatula)")
     parser.add_argument("--dataset-root", type=str, default="data/raw/gazebo_dataset", help="Raiz do dataset local")
     parser.add_argument(
         "--dataset-view",
