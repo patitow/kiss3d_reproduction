@@ -127,6 +127,7 @@ else:
                 print(f"[AVISO] Não foi possível verificar versão do nvcc: {e}")
 
 # Configurar Visual Studio - PRIORIZAR VS 2019 (compatível com CUDA 12.1)
+# CRÍTICO: Configurar ANTES de qualquer importação do PyTorch/distutils
 vs_base_paths = [
     "C:\\Program Files (x86)\\Microsoft Visual Studio",
     "C:\\Program Files\\Microsoft Visual Studio"
@@ -134,14 +135,24 @@ vs_base_paths = [
 
 vs_found = False
 vs_preferred = ["2019"]  # VS 2019 é OBRIGATÓRIO para CUDA 12.1 - melhor compatibilidade
+vs2019_vcvarsall = None
+vs2019_cl_path = None
 
 for vs_base in vs_base_paths:
     if os.path.exists(vs_base):
         for vs_version in vs_preferred:
             vs_path = os.path.join(vs_base, vs_version)
             if os.path.exists(vs_path):
+                # Procurar por vcvarsall.bat primeiro (melhor método)
+                for edition in ["BuildTools", "Community", "Professional", "Enterprise"]:
+                    vcvarsall_path = os.path.join(vs_path, edition, "VC", "Auxiliary", "Build", "vcvarsall.bat")
+                    if os.path.exists(vcvarsall_path):
+                        vs2019_vcvarsall = vcvarsall_path
+                        print(f"[INFO] VS 2019 vcvarsall.bat encontrado: {vcvarsall_path}")
+                        break
+                
                 # Procurar por cl.exe no caminho típico
-                for edition in ["Community", "Professional", "Enterprise", "BuildTools"]:
+                for edition in ["BuildTools", "Community", "Professional", "Enterprise"]:
                     vc_tools = os.path.join(vs_path, edition, "VC", "Tools", "MSVC")
                     if os.path.exists(vc_tools):
                         # Procurar versão mais recente do MSVC
@@ -151,13 +162,20 @@ for vs_base in vs_base_paths:
                                 cl_path = os.path.join(vc_tools, msvc_versions[0], "bin", "Hostx64", "x64", "cl.exe")
                                 if os.path.exists(cl_path):
                                     cl_dir = os.path.dirname(cl_path)
+                                    vs2019_cl_path = cl_dir
                                     current_path = os.environ.get("PATH", "")
-                                    # Adicionar no início do PATH
-                                    if cl_dir not in current_path:
-                                        os.environ["PATH"] = cl_dir + os.pathsep + current_path
-                                        print(f"[INFO] Visual Studio {vs_version} encontrado e adicionado ao PATH: {cl_dir}")
-                                        vs_found = True
-                                        break
+                                    # Remover qualquer VS 2022 do PATH primeiro
+                                    path_parts = [p for p in current_path.split(os.pathsep) if "Visual Studio" not in p or "2019" in p]
+                                    # Adicionar VS 2019 no INÍCIO do PATH
+                                    if cl_dir not in path_parts:
+                                        os.environ["PATH"] = cl_dir + os.pathsep + os.pathsep.join(path_parts)
+                                    else:
+                                        # Mover para o início
+                                        path_parts = [p for p in path_parts if p != cl_dir]
+                                        os.environ["PATH"] = cl_dir + os.pathsep + os.pathsep.join(path_parts)
+                                    print(f"[INFO] VS 2019 cl.exe encontrado e adicionado ao INÍCIO do PATH: {cl_dir}")
+                                    vs_found = True
+                                    break
                         except Exception as e:
                             print(f"[AVISO] Erro ao procurar MSVC em {vc_tools}: {e}")
                 if vs_found:
@@ -165,8 +183,50 @@ for vs_base in vs_base_paths:
         if vs_found:
             break
 
-if not vs_found:
-    print("[AVISO] Visual Studio não encontrado. Compilação pode falhar.")
+if vs_found:
+    # Configurar variáveis de ambiente do distutils para forçar VS 2019
+    os.environ["DISTUTILS_USE_SDK"] = "1"
+    # Configurar versão do toolset (14.29 = VS 2019)
+    if vs2019_cl_path and "14.29" in vs2019_cl_path:
+        os.environ["CMAKE_GENERATOR_TOOLSET_VERSION"] = "14.29"
+    elif vs2019_cl_path and "14.27" in vs2019_cl_path:
+        os.environ["CMAKE_GENERATOR_TOOLSET_VERSION"] = "14.27"
+    else:
+        os.environ["CMAKE_GENERATOR_TOOLSET_VERSION"] = "14.29"  # Default VS 2019
+    
+    # Se vcvarsall.bat foi encontrado, executar via subprocess para configurar ambiente
+    if vs2019_vcvarsall:
+        try:
+            import subprocess
+            # Executar vcvarsall.bat e capturar variáveis de ambiente
+            # Usar cmd /c para executar o batch e exportar variáveis
+            cmd = f'cmd /c "{vs2019_vcvarsall}" x64 && set'
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                # Parsear variáveis de ambiente do output
+                for line in result.stdout.split('\n'):
+                    line = line.strip()
+                    if '=' in line and not line.startswith('_'):
+                        key, value = line.split('=', 1)
+                        # Atualizar PATH e outras variáveis importantes
+                        if key == 'PATH':
+                            # Adicionar VS 2019 no início
+                            current_path = os.environ.get("PATH", "")
+                            if value not in current_path:
+                                os.environ["PATH"] = value + os.pathsep + current_path
+                        elif key in ["INCLUDE", "LIB", "LIBPATH"]:
+                            os.environ[key] = value
+                print(f"[INFO] VS 2019 ambiente configurado via vcvarsall.bat")
+        except Exception as e:
+            print(f"[AVISO] Não foi possível executar vcvarsall.bat: {e}")
+            print(f"[INFO] Continuando com configuração manual do PATH")
+    
+    print(f"[OK] VS 2019 configurado corretamente")
+else:
+    print("[ERRO] VS 2019 não encontrado! Compilação vai falhar.")
+    print("[INFO] Instale Visual Studio 2019 Build Tools:")
+    print("  https://visualstudio.microsoft.com/vs/older-downloads/")
+    print("  Selecione: 'Desktop development with C++'")
 
 # Configurar TORCH_CUDA_ARCH_LIST - deixar vazio para auto-detectar, mas garantir que não tenha valores antigos
 # O PyTorch vai detectar automaticamente a arquitetura da GPU disponível
