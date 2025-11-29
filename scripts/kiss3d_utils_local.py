@@ -278,8 +278,17 @@ def lrm_reconstruct(
         frames = None
         albedos = None
 
-    vertices = torch.from_numpy(vertices).to(device)
-    faces = torch.from_numpy(faces).to(device)
+    # Converter para tensor se necessário (extract_mesh retorna numpy quando export_texmap=False, tensor quando True)
+    if isinstance(vertices, np.ndarray):
+        vertices = torch.from_numpy(vertices).to(device)
+    else:
+        vertices = vertices.to(device)
+    
+    if isinstance(faces, np.ndarray):
+        faces = torch.from_numpy(faces).to(device)
+    else:
+        faces = faces.to(device)
+    
     vertices = vertices @ rotate_x(np.pi / 2, device=device)[:3, :3]
     vertices = vertices @ rotate_y(np.pi / 2, device=device)[:3, :3]
 
@@ -318,23 +327,8 @@ def isomer_reconstruct(
     end = time.time()
     device = rgb_multi_view.device
     
-    # Detect if pytorch3d has GPU support, fallback to CPU if not
-    try:
-        from pytorch3d.structures import Meshes
-        test_mesh = Meshes(verts=[torch.zeros(3, 3)], faces=[torch.zeros(1, 3).long()])
-        if device.type == 'cuda':
-            test_mesh = test_mesh.to(device)
-            _ = test_mesh.faces_normals_packed()  # This will fail if no GPU support
-        py3d_device = device
-    except RuntimeError as e:
-        if "Not compiled with GPU support" in str(e) or "GPU" in str(e):
-            logger.warning("pytorch3d não tem suporte GPU, forçando CPU para operações ISOMER")
-            py3d_device = torch.device('cpu')
-            # Move tensors to CPU for pytorch3d operations
-            vertices = vertices.cpu() if isinstance(vertices, torch.Tensor) else vertices
-            faces = faces.cpu() if isinstance(faces, torch.Tensor) else faces
-        else:
-            raise
+    # Use GPU device for pytorch3d operations (no CPU fallback)
+    py3d_device = device
     
     to_tensor_ = lambda x: torch.Tensor(x).float().to(device)
 

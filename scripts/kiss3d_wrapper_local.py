@@ -40,6 +40,25 @@ from kiss3d_utils_local import (
     KISS3D_ROOT,
 )
 
+# Importar funções de logging se disponíveis
+try:
+    from setup_logging import log_memory_usage, log_model_operation
+except ImportError:
+    # Fallback se setup_logging não estiver disponível
+    def log_memory_usage(logger, label="Memory check"):
+        if torch.cuda.is_available():
+            allocated = torch.cuda.memory_allocated() / 1024**2
+            reserved = torch.cuda.memory_reserved() / 1024**2
+            logger.info(f"[MEMORY] {label} | Allocated: {allocated:.1f} MB | Reserved: {reserved:.1f} MB")
+    
+    def log_model_operation(logger, operation, model_name, device=None, memory_mb=None):
+        msg = f"[MODEL] {operation}: {model_name}"
+        if device:
+            msg += f" | Device: {device}"
+        if memory_mb is not None:
+            msg += f" | Memory: {memory_mb:.1f} MB"
+        logger.info(msg)
+
 CUSTOM_PIPELINE_DIR = KISS3D_ROOT / "pipeline" / "custom_pipelines"
 if str(CUSTOM_PIPELINE_DIR) not in sys.path:
     sys.path.insert(0, str(CUSTOM_PIPELINE_DIR))
@@ -208,66 +227,87 @@ class kiss3d_wrapper(object):
     def del_llm_model(self):
         if self.llm_model is not None:
             try:
+                logger.info("[MODEL] Descarregando LLM model...")
                 # Convert to float32 before moving to CPU to avoid float16 warnings
                 if hasattr(self.llm_model, 'dtype'):
                     model_dtype = getattr(self.llm_model, 'dtype', None)
                     if model_dtype in [torch.float16, torch.bfloat16]:
                         # Try to convert, but some models don't support it
                         try:
+                            logger.debug(f"[MODEL] Convertendo LLM model de {model_dtype} para float32")
                             self.llm_model = self.llm_model.to(torch.float32)
-                        except Exception:
-                            pass  # If conversion fails, just move to CPU anyway
+                        except Exception as e:
+                            logger.warning(f"[MODEL] Erro ao converter LLM model: {e}")
                 self.llm_model.to("cpu")
-            except Exception:
-                pass
+                logger.info("[MODEL] LLM model descarregado para CPU")
+            except Exception as e:
+                logger.error(f"[MODEL] Erro ao descarregar LLM model: {e}")
         self.llm_model = None
         self.llm_tokenizer = None
         _empty_cuda_cache()
 
     def release_text_models(self):
+        logger.info("[MODEL] Iniciando descarregamento de modelos de texto (caption + LLM)")
+        log_memory_usage(logger, "Antes de descarregar modelos de texto")
+        
         if self.caption_model is not None:
             try:
+                logger.info("[MODEL] Descarregando caption model...")
                 # Convert to float32 before moving to CPU to avoid float16 warnings
                 if hasattr(self.caption_model, 'dtype'):
                     model_dtype = getattr(self.caption_model, 'dtype', None)
                     if model_dtype in [torch.float16, torch.bfloat16]:
                         try:
+                            logger.debug(f"[MODEL] Convertendo caption model de {model_dtype} para float32")
                             self.caption_model = self.caption_model.to(torch.float32)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.warning(f"[MODEL] Erro ao converter caption model: {e}")
                 self.caption_model.to("cpu")
-            except Exception:
-                pass
+                logger.info("[MODEL] Caption model descarregado para CPU")
+            except Exception as e:
+                logger.error(f"[MODEL] Erro ao descarregar caption model: {e}")
             self.caption_model = None
         self.del_llm_model()
+        log_memory_usage(logger, "Após descarregar modelos de texto")
 
     def offload_multiview_pipeline(self):
         if self.multiview_pipeline is not None:
             try:
+                logger.info("[MODEL] Descarregando multiview pipeline...")
+                log_memory_usage(logger, "Antes de descarregar multiview pipeline")
                 # Don't move float16 pipelines to CPU - they should use CPU offload
                 pipeline_dtype = getattr(self.multiview_pipeline, 'dtype', None)
                 if pipeline_dtype == torch.float16:
                     # Use CPU offload if available, otherwise skip
                     if hasattr(self.multiview_pipeline, 'enable_model_cpu_offload'):
+                        logger.info("[MODEL] Habilitando CPU offload para multiview pipeline (float16)")
                         self.multiview_pipeline.enable_model_cpu_offload()
                     else:
-                        logger.warning("Multiview pipeline is float16, skipping CPU move to avoid warnings")
+                        logger.warning("[MODEL] Multiview pipeline é float16, pulando movimento para CPU para evitar warnings")
                 else:
+                    logger.info(f"[MODEL] Movendo multiview pipeline para CPU (dtype: {pipeline_dtype})")
                     self.multiview_pipeline.to("cpu")
-            except Exception:
-                pass
+                logger.info("[MODEL] Multiview pipeline descarregado")
+                log_memory_usage(logger, "Após descarregar multiview pipeline")
+            except Exception as e:
+                logger.error(f"[MODEL] Erro ao descarregar multiview pipeline: {e}")
         _empty_cuda_cache()
 
     def offload_flux_pipelines(self):
+        logger.info("[MODEL] Descarregando pipelines Flux...")
+        log_memory_usage(logger, "Antes de descarregar pipelines Flux")
         # Flux pipelines already use CPU offload, don't move them directly
         # They are managed by enable_sequential_cpu_offload()
         if self.flux_pipeline is not None:
+            logger.info("[MODEL] Flux pipeline já usa CPU offload sequencial, apenas limpando cache")
             # Just clear cache, pipeline is already offloaded
             pass
         if self.flux_redux_pipeline is not None:
+            logger.info("[MODEL] Flux Redux pipeline já usa CPU offload sequencial, apenas limpando cache")
             # Just clear cache, pipeline is already offloaded
             pass
         _empty_cuda_cache()
+        log_memory_usage(logger, "Após descarregar pipelines Flux")
 
     def generate_multiview(self, image, seed=None, num_inference_steps=None):
         seed = seed or self.config["multiview"].get("seed", 0)
@@ -740,6 +780,7 @@ def init_wrapper_from_config(
     }
 
     logger.info("==> Loading Flux model ...")
+    log_memory_usage(logger, "Início do carregamento de modelos")
     flux_device = config_["flux"].get("device", "cpu")
     flux_base_model_pth = config_["flux"].get("base_model", None)
     flux_fallback_model = config_["flux"].get("fallback_base_model")
@@ -752,6 +793,10 @@ def init_wrapper_from_config(
     flux_lora_pth = config_["flux"].get("lora", None)
     flux_redux_pth = config_["flux"].get("redux", None) if load_redux else None
     flux_cpu_offload = config_["flux"].get("cpu_offload", False)
+    
+    logger.info(f"[MODEL] Configuração Flux: device={flux_device}, dtype={flux_dtype}, cpu_offload={flux_cpu_offload}")
+    logger.info(f"[MODEL] ControlNet: {'carregar' if load_controlnet else 'não carregar'}")
+    logger.info(f"[MODEL] Redux: {'carregar' if load_redux else 'não carregar'}")
 
     def _load_flux_pipeline(model_id: str):
         if model_id.endswith("safetensors"):
@@ -768,6 +813,8 @@ def init_wrapper_from_config(
         )
 
     try:
+        logger.info(f"[MODEL] Carregando Flux base model: {flux_base_model_pth}")
+        log_memory_usage(logger, "Antes de carregar Flux base")
         # Validar se o caminho do modelo fp8 existe antes de tentar carregar
         if flux_base_model_pth and flux_base_model_pth.endswith("safetensors"):
             if not os.path.exists(flux_base_model_pth):
@@ -776,6 +823,7 @@ def init_wrapper_from_config(
                     flux_base_model_pth,
                 )
                 if flux_fallback_model:
+                    logger.info(f"[MODEL] Usando fallback: {flux_fallback_model}")
                     flux_pipe = _load_flux_pipeline(flux_fallback_model)
                 else:
                     raise FileNotFoundError(
@@ -785,6 +833,8 @@ def init_wrapper_from_config(
                 flux_pipe = _load_flux_pipeline(flux_base_model_pth)
         else:
             flux_pipe = _load_flux_pipeline(flux_base_model_pth)
+        log_memory_usage(logger, "Após carregar Flux base")
+        logger.info("[MODEL] Flux base model carregado com sucesso")
     except (EnvironmentError, FileNotFoundError, OSError) as exc:
         if flux_fallback_model and flux_fallback_model != flux_base_model_pth:
             logger.warning(
@@ -798,6 +848,8 @@ def init_wrapper_from_config(
             raise
 
     if flux_controlnet_pth is not None:
+        logger.info(f"[MODEL] Carregando ControlNet: {flux_controlnet_pth}")
+        log_memory_usage(logger, "Antes de carregar ControlNet")
         controlnet_dtype = dtype_[flux_dtype] if flux_dtype != "fp8" else torch.bfloat16
         flux_controlnet = FluxControlNetModel.from_pretrained(
             flux_controlnet_pth,
@@ -808,12 +860,20 @@ def init_wrapper_from_config(
             FluxControlNetImg2ImgPipeline,
             controlnet=[flux_controlnet],
         )
+        log_memory_usage(logger, "Após carregar ControlNet")
+        logger.info("[MODEL] ControlNet carregado e integrado com sucesso")
+    else:
+        logger.info("[MODEL] ControlNet não será carregado (load_controlnet=False ou não configurado)")
 
     flux_pipe.scheduler = FlowMatchHeunDiscreteScheduler.from_config(flux_pipe.scheduler.config)
 
+    logger.info(f"[MODEL] Carregando LoRA: {flux_lora_pth}")
     if not os.path.exists(flux_lora_pth):
+        logger.info("[MODEL] LoRA não encontrado localmente, baixando do HuggingFace...")
         flux_lora_pth = hf_hub_download(repo_id="LTT/Kiss3DGen", filename="rgb_normal.safetensors", repo_type="model")
+        logger.info(f"[MODEL] LoRA baixado para: {flux_lora_pth}")
     flux_pipe.load_lora_weights(flux_lora_pth)
+    logger.info("[MODEL] LoRA carregado com sucesso")
 
     def _apply_memory_optimizations(pipe):
         if hasattr(pipe, "enable_attention_slicing"):
@@ -856,6 +916,8 @@ def init_wrapper_from_config(
 
     flux_redux_pipe = None
     if flux_redux_pth is not None:
+        logger.info(f"[MODEL] Carregando Flux Redux: {flux_redux_pth}")
+        log_memory_usage(logger, "Antes de carregar Flux Redux")
         flux_redux_pipe = FluxPriorReduxPipeline.from_pretrained(
             flux_redux_pth,
             torch_dtype=torch.bfloat16,
@@ -866,16 +928,22 @@ def init_wrapper_from_config(
         flux_redux_pipe.tokenizer_2 = flux_pipe.tokenizer_2
 
         _place_pipeline_on_device(flux_redux_pipe, "Flux Redux pipeline")
+        log_memory_usage(logger, "Após carregar Flux Redux")
+        logger.info("[MODEL] Flux Redux carregado com sucesso")
+    else:
+        logger.info("[MODEL] Flux Redux não será carregado (load_redux=False ou não configurado)")
 
     _log_cuda_allocation(flux_device, "load flux model")
 
     logger.info("==> Loading multiview diffusion model ...")
+    log_memory_usage(logger, "Antes de carregar multiview model")
     multiview_device = config_["multiview"].get("device", "cpu")
     mv_dtype = (
         torch.float16
         if isinstance(multiview_device, str) and multiview_device.startswith("cuda")
         else torch.float32
     )
+    logger.info(f"[MODEL] Carregando Zero123++ multiview: device={multiview_device}, dtype={mv_dtype}")
     try:
         multiview_pipeline = DiffusionPipeline.from_pretrained(
             config_["multiview"]["base_model"],
@@ -883,6 +951,7 @@ def init_wrapper_from_config(
             torch_dtype=mv_dtype,
             use_safetensors=True,  # Forçar uso de safetensors quando disponível
         )
+        logger.info("[MODEL] Zero123++ base carregado com safetensors")
     except Exception as e:
         logger.warning(
             "Falha ao carregar Zero123++ com safetensors. Tentando sem safetensors: %s", e
@@ -893,62 +962,91 @@ def init_wrapper_from_config(
             torch_dtype=mv_dtype,
             use_safetensors=False,  # Fallback para pickle se safetensors não disponível
         )
+        logger.info("[MODEL] Zero123++ base carregado sem safetensors (fallback)")
     multiview_pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
         multiview_pipeline.scheduler.config, timestep_spacing="trailing"
     )
 
+    logger.info("[MODEL] Carregando UNet customizado (FlexGen) para Zero123++")
     unet_ckpt_path = config_["multiview"].get("unet", None)
     if not os.path.exists(unet_ckpt_path):
+        logger.info("[MODEL] UNet não encontrado localmente, baixando do HuggingFace...")
         unet_ckpt_path = hf_hub_download(repo_id="LTT/Kiss3DGen", filename="flexgen.ckpt", repo_type="model")
+        logger.info(f"[MODEL] UNet baixado para: {unet_ckpt_path}")
     state_dict = torch.load(unet_ckpt_path, map_location="cpu", weights_only=True)
     multiview_pipeline.unet.load_state_dict(state_dict, strict=True)
+    logger.info("[MODEL] UNet customizado carregado com sucesso")
 
     multiview_pipeline.to(multiview_device)
+    log_memory_usage(logger, "Após carregar multiview model")
     _log_cuda_allocation(multiview_device, "load multiview model")
+    logger.info("[MODEL] Multiview model carregado e movido para dispositivo")
 
     logger.info("==> Loading caption model ...")
+    log_memory_usage(logger, "Antes de carregar caption model")
     caption_device = config_["caption"].get("device", "cpu")
     caption_dtype = (
         torch.bfloat16
         if isinstance(caption_device, str) and caption_device.startswith("cuda")
         else torch.float32
     )
+    logger.info(f"[MODEL] Carregando caption model: device={caption_device}, dtype={caption_dtype}")
     caption_model = AutoModelForCausalLM.from_pretrained(
         config_["caption"]["base_model"],
         torch_dtype=caption_dtype,
         trust_remote_code=True,
     ).to(caption_device)
     caption_processor = AutoProcessor.from_pretrained(config_["caption"]["base_model"], trust_remote_code=True)
+    log_memory_usage(logger, "Após carregar caption model")
     _log_cuda_allocation(caption_device, "load caption model")
+    logger.info("[MODEL] Caption model carregado com sucesso")
 
-    logger.info("==> Loading reconstruction model ...")
+    logger.info("==> Loading reconstruction model (LRM) ...")
+    log_memory_usage(logger, "Antes de carregar LRM")
     recon_device = config_["reconstruction"].get("device", "cpu")
+    logger.info(f"[MODEL] Carregando LRM: device={recon_device}")
     recon_model_config = OmegaConf.load(config_["reconstruction"]["model_config"])
     recon_model = instantiate_from_config(recon_model_config.model_config)
     model_ckpt_path = config_["reconstruction"]["base_model"]
     if not os.path.exists(model_ckpt_path):
+        logger.info("[MODEL] LRM checkpoint não encontrado localmente, baixando do HuggingFace...")
         model_ckpt_path = hf_hub_download(repo_id="LTT/PRM", filename="final_ckpt.ckpt", repo_type="model")
+        logger.info(f"[MODEL] LRM checkpoint baixado para: {model_ckpt_path}")
+    logger.info(f"[MODEL] Carregando pesos do LRM de: {model_ckpt_path}")
     state_dict = torch.load(model_ckpt_path, map_location="cpu", weights_only=True)["state_dict"]
     state_dict = {k[14:]: v for k, v in state_dict.items() if k.startswith("lrm_generator.")}
     recon_model.load_state_dict(state_dict, strict=True)
     recon_model.to(recon_device)
+    logger.info("[MODEL] Inicializando geometria FlexiCubes do LRM...")
     recon_model.init_flexicubes_geometry(recon_device, fovy=50.0)
     recon_model.eval()
+    log_memory_usage(logger, "Após carregar LRM")
     _log_cuda_allocation(recon_device, "load reconstruction model")
+    logger.info("[MODEL] LRM carregado e inicializado com sucesso")
 
     llm_configs = None if disable_llm else config_.get("llm", None)
     if llm_configs is not None:
         logger.info("==> Loading LLM ...")
+        log_memory_usage(logger, "Antes de carregar LLM")
         llm_device = llm_configs.get("device", "cpu")
+        logger.info(f"[MODEL] Carregando LLM: device={llm_device}")
         llm, llm_tokenizer = load_llm_model(
             llm_configs["base_model"],
             device_map=llm_device,
         )
         if isinstance(llm_device, str) and llm_device.startswith("cuda"):
             llm.to(llm_device)
+        log_memory_usage(logger, "Após carregar LLM")
         _log_cuda_allocation(llm_device, "load llm model")
+        logger.info("[MODEL] LLM carregado com sucesso")
     else:
+        logger.info("[MODEL] LLM não será carregado (disable_llm=True ou não configurado)")
         llm, llm_tokenizer = None, None
+    
+    log_memory_usage(logger, "Final do carregamento de todos os modelos")
+    logger.info("="*80)
+    logger.info("TODOS OS MODELOS CARREGADOS COM SUCESSO")
+    logger.info("="*80)
 
     return kiss3d_wrapper(
         config=config_,

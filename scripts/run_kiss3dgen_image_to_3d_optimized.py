@@ -1,126 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Pipeline IMAGE TO 3D baseado no Kiss3DGen
-Reproduz exatamente o pipeline do artigo Kiss3DGen
+Pipeline IMAGE TO 3D otimizado para 12GB VRAM
+- Quantização automática
+- Pipeline segmentado com alocação/desalocação de modelos
+- Alinhado com implementação original
 """
 
 import sys
 import os
 import json
-import logging
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
-# Setup logging completo ANTES de qualquer outro import
-from setup_logging import setup_complete_logging, LoggingContext, log_model_operation, log_memory_usage
-
-# Adicionar ninja ao PATH antes de qualquer import
+# Adicionar paths necessários
 project_root = Path(__file__).parent.parent
-venv_path = project_root / "mesh3d-generator-py3.11"
-possible_ninja_paths = [
-    project_root,  # Pode estar na raiz do projeto
-    venv_path / "Scripts",
-    venv_path / "ninja" / "data" / "bin",
-    venv_path / "Lib" / "site-packages" / "ninja" / "data" / "bin",
-]
-
-# Também verificar no site-packages do Python
-try:
-    import site
-    site_packages = site.getsitepackages()[0] if site.getsitepackages() else None
-    if site_packages:
-        possible_ninja_paths.append(Path(site_packages) / "ninja" / "data" / "bin")
-except:
-    pass
-
-ninja_found = False
-for ninja_path in possible_ninja_paths:
-    ninja_exe = ninja_path / "ninja.exe"
-    if ninja_exe.exists():
-        current_path = os.environ.get("PATH", "")
-        if str(ninja_path) not in current_path:
-            os.environ["PATH"] = str(ninja_path) + os.pathsep + current_path
-        print(f"[INFO] Ninja encontrado e adicionado ao PATH: {ninja_path}")
-        ninja_found = True
-        break
-
-if not ninja_found:
-    print("[AVISO] Ninja nao encontrado - pode causar erros ao compilar extensoes C++")
-    print("[INFO] Tentando adicionar Scripts ao PATH de qualquer forma...")
-    scripts_path = venv_path / "Scripts"
-    if scripts_path.exists():
-        current_path = os.environ.get("PATH", "")
-        if str(scripts_path) not in current_path:
-            os.environ["PATH"] = str(scripts_path) + os.pathsep + current_path
-            print(f"[INFO] Scripts adicionado ao PATH: {scripts_path}")
-
-# Configurar CUDA_HOME se nao estiver definido
-if "CUDA_HOME" not in os.environ and "CUDA_PATH" not in os.environ:
-    cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
-    
-    if not cuda_home:
-        try:
-            import torch
-            cuda_version = torch.version.cuda
-            if cuda_version:
-                cuda_base = "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA"
-                possible_cuda_paths = []
-                
-                if os.path.exists(cuda_base):
-                    for item in os.listdir(cuda_base):
-                        cuda_path = os.path.join(cuda_base, item)
-                        if os.path.isdir(cuda_path) and item.startswith("v"):
-                            possible_cuda_paths.append(cuda_path)
-                
-                if cuda_version:
-                    version_parts = cuda_version.split(".")
-                    if len(version_parts) >= 2:
-                        version_major_minor = f"{version_parts[0]}.{version_parts[1]}"
-                        specific_path = os.path.join(cuda_base, f"v{version_major_minor}")
-                        if os.path.exists(specific_path) and specific_path not in possible_cuda_paths:
-                            possible_cuda_paths.insert(0, specific_path)
-                
-                cuda_found = False
-                for cuda_path in possible_cuda_paths:
-                    if os.path.exists(cuda_path) and os.path.exists(os.path.join(cuda_path, "bin", "nvcc.exe")):
-                        os.environ["CUDA_HOME"] = cuda_path
-                        os.environ["CUDA_PATH"] = cuda_path
-                        print(f"[INFO] CUDA_HOME configurado: {cuda_path}")
-                        cuda_found = True
-                        break
-                
-                if not cuda_found:
-                    print("[AVISO] CUDA_HOME nao encontrado automaticamente")
-                    default_cuda = "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.1"
-                    if os.path.exists(default_cuda):
-                        os.environ["CUDA_HOME"] = default_cuda
-                        os.environ["CUDA_PATH"] = default_cuda
-                        print(f"[INFO] CUDA_HOME configurado para caminho padrao: {default_cuda}")
-        except Exception as e:
-            print(f"[AVISO] Erro ao configurar CUDA_HOME: {e}")
-
-# Adicionar CUDA bin ao PATH se CUDA_HOME estiver configurado
-cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
-if cuda_home:
-    cuda_bin = os.path.join(cuda_home, "bin")
-    if os.path.exists(cuda_bin):
-        current_path = os.environ.get("PATH", "")
-        if cuda_bin not in current_path:
-            os.environ["PATH"] = cuda_bin + os.pathsep + current_path
-            print(f"[INFO] CUDA bin adicionado ao PATH: {cuda_bin}")
-
-# Adicionar paths - IMPORTANTE: Kiss3DGen precisa estar no path
 kiss3dgen_path = project_root / "Kiss3DGen"
 if not kiss3dgen_path.exists():
-    print(f"[ERRO] Kiss3DGen nao encontrado em: {kiss3dgen_path}")
-    print(f"[INFO] Certifique-se de que o diretorio Kiss3DGen existe")
+    print(f"[ERRO] Kiss3DGen não encontrado em: {kiss3dgen_path}")
     sys.exit(1)
 
 sys.path.insert(0, str(project_root))
 
 import argparse
 import shutil
+import torch
 
 from kiss3d_utils_local import (
     TMP_DIR,
@@ -129,18 +33,15 @@ from kiss3d_utils_local import (
     ensure_hf_token,
     evaluate_mesh_against_gt,
 )
-from kiss3d_wrapper_local import init_wrapper_from_config, run_image_to_3d
+from kiss3d_wrapper_optimized import init_optimized_wrapper
 
 os.environ.setdefault("XFORMERS_FORCE_DISABLE_TRITON", "1")
-# expandable_segments não suportado no Windows - removido para evitar warnings
 
 DATASET_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp")
 
 
 def _collect_dataset_views(dataset_root: Path, dataset_item: str) -> Dict[int, Path]:
-    """
-    Retorna um dicionário {view_index: caminho} para as imagens do dataset.
-    """
+    """Retorna um dicionário {view_index: caminho} para as imagens do dataset."""
     image_dir = dataset_root / "images"
     view_map: Dict[int, Path] = {}
     if not image_dir.exists():
@@ -157,9 +58,7 @@ def _collect_dataset_views(dataset_root: Path, dataset_item: str) -> Dict[int, P
 
 
 def _parse_view_argument(raw_value: str, available_views: Dict[int, Path]) -> List[int]:
-    """
-    Converte a string fornecida em uma lista de índices válidos.
-    """
+    """Converte a string fornecida em uma lista de índices válidos."""
     if not raw_value:
         return []
 
@@ -181,50 +80,50 @@ def _parse_view_argument(raw_value: str, available_views: Dict[int, Path]) -> Li
 
     return selected
 
+
+def log_vram_usage(label: str):
+    """Loga uso de VRAM."""
+    if torch.cuda.is_available():
+        allocated = torch.cuda.memory_allocated() / 1024**3
+        reserved = torch.cuda.memory_reserved() / 1024**3
+        print(f"[VRAM] {label}: {allocated:.2f} GB alocada, {reserved:.2f} GB reservada")
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Pipeline IMAGE TO 3D - Kiss3DGen")
+    parser = argparse.ArgumentParser(description="Pipeline IMAGE TO 3D Otimizado - Kiss3DGen (12GB VRAM)")
     parser.add_argument("--input", type=str, help="Caminho para imagem de input")
-    parser.add_argument("--output", type=str, default="data/outputs/kiss3dgen", help="Diretorio de saida")
+    parser.add_argument("--output", type=str, default="data/outputs/kiss3dgen_optimized", help="Diretório de saída")
     parser.add_argument(
         "--config",
         type=str,
         default="pipeline/pipeline_config/default.yaml",
-        help="Caminho para config YAML (relativo ao diretorio Kiss3DGen)",
+        help="Caminho para config YAML (relativo ao diretório Kiss3DGen)",
     )
     parser.add_argument("--enable-redux", action="store_true", default=True, help="Habilitar Redux")
     parser.add_argument("--use-mv-rgb", action="store_true", default=True, help="Usar RGB multiview")
     parser.add_argument("--use-controlnet", action="store_true", default=True, help="Usar ControlNet")
-    parser.add_argument(
-        "--fast-mode",
-        action="store_true",
-        help="Preset leve: menos passos, sem Redux/ControlNet, libera memoria agressivamente.",
-    )
-    parser.add_argument(
-        "--disable-llm",
-        action="store_true",
-        help="Desabilita refinamento de prompt com LLM (economiza VRAM/RAM).",
-    )
+    parser.add_argument("--target-vram", type=float, default=12.0, help="VRAM alvo em GB (default: 12.0)")
     parser.add_argument("--dataset-item", type=str, help="Nome do item em data/raw/gazebo_dataset")
     parser.add_argument("--dataset-root", type=str, default="data/raw/gazebo_dataset", help="Raiz do dataset local")
     parser.add_argument(
         "--dataset-view",
         type=str,
         default="0",
-        help="Sufixo(s) da imagem (_{N}.jpg) a usar como input. "
-        "Use 'all' para testar todas as vistas ou uma lista separada por vírgula (ex.: '0,2,4').",
+        help="Sufixo(s) da imagem (_{N}.jpg) a usar como input. Use 'all' para testar todas as vistas.",
     )
     parser.add_argument("--gt-mesh", type=str, help="Caminho para a malha ground-truth (obj/glb)")
-    parser.add_argument("--gt-samples", type=int, default=50000, help="Numero de pontos amostrados para as métricas")
+    parser.add_argument("--gt-samples", type=int, default=50000, help="Número de pontos amostrados para as métricas")
     parser.add_argument(
         "--metrics-out",
         type=str,
-        help="Arquivo JSON para salvar métricas de reconstrução (default: <output>/<input>_metrics.json)",
+        help="Arquivo JSON para salvar métricas de reconstrução",
     )
     parser.add_argument(
         "--disable-metrics-normalization",
         action="store_true",
-        help="Não normaliza as malhas antes de calcular as métricas (por padrão normalizamos).",
+        help="Não normaliza as malhas antes de calcular as métricas",
     )
+    parser.add_argument("--seed", type=int, default=None, help="Seed para reprodutibilidade")
     
     args = parser.parse_args()
     
@@ -266,8 +165,6 @@ def main():
             if dataset_gt.exists():
                 args.gt_mesh = str(dataset_gt.resolve())
                 print(f"[INFO] Usando ground-truth padrão do dataset: {args.gt_mesh}")
-            else:
-                print("[AVISO] Ground-truth do dataset não encontrado; métricas serão puladas.")
 
     if not selected_inputs:
         if not args.input:
@@ -316,7 +213,7 @@ def main():
             if default_config.exists():
                 args.config = str(default_config.resolve())
             else:
-                print(f"[ERRO] Config nao encontrado: {args.config}")
+                print(f"[ERRO] Config não encontrado: {args.config}")
                 sys.exit(1)
     else:
         args.config = str(config_path.resolve())
@@ -324,29 +221,9 @@ def main():
     os.makedirs(args.output, exist_ok=True)
     os.makedirs(TMP_DIR, exist_ok=True)
     
-    # Setup logging completo
-    log_dir = Path(args.output) / "logs"
-    pipeline_logger, log_file = setup_complete_logging(
-        log_dir=log_dir,
-        log_level=logging.DEBUG,
-        capture_warnings=True,
-        capture_stdout=True
-    )
-    
-    # Redirecionar print para logger também
-    import builtins
-    original_print = builtins.print
-    def logged_print(*args, **kwargs):
-        original_print(*args, **kwargs)
-        pipeline_logger.info(" ".join(str(arg) for arg in args))
-    builtins.print = logged_print
-    
     print("=" * 60)
-    print("Pipeline IMAGE TO 3D - Kiss3DGen")
+    print("Pipeline IMAGE TO 3D Otimizado - Kiss3DGen (12GB VRAM)")
     print("=" * 60)
-    pipeline_logger.info("=" * 60)
-    pipeline_logger.info("Pipeline IMAGE TO 3D - Kiss3DGen")
-    pipeline_logger.info("=" * 60)
     if len(selected_inputs) == 1:
         print(f"Input: {selected_inputs[0]['path']}")
     else:
@@ -355,6 +232,7 @@ def main():
             print(f"  - {job['label']}: {job['path']}")
     print(f"Output: {args.output}")
     print(f"Config: {args.config}")
+    print(f"Target VRAM: {args.target_vram} GB")
     print(f"Redux: {args.enable_redux}")
     print(f"Use MV RGB: {args.use_mv_rgb}")
     print(f"Use ControlNet: {args.use_controlnet}")
@@ -369,42 +247,23 @@ def main():
     if ensure_hf_token(project_root / ".env"):
         print("[OK] Token HuggingFace carregado.")
     else:
-        print("[AVISO] Token HuggingFace nao configurado; repositorios privados podem falhar.")
+        print("[AVISO] Token HuggingFace não configurado; repositórios privados podem falhar.")
 
-    if args.fast_mode:
-        os.environ["KISS3D_FAST_MODE"] = "1"
-        args.enable_redux = False
-    
     # Verificar se arquivo existe
     if not os.path.exists(args.input):
-        print(f"[ERRO] Arquivo nao encontrado: {args.input}")
+        print(f"[ERRO] Arquivo não encontrado: {args.input}")
         return
     
-    # Verificar se config existe (agora relativo ao diretorio Kiss3DGen onde estamos)
-    if not os.path.exists(args.config):
-        print(f"[ERRO] Config nao encontrado: {args.config}")
-        print(f"[INFO] Tentando usar config padrao do Kiss3DGen")
-        default_config = Path('pipeline/pipeline_config/default.yaml')
-        if default_config.exists():
-            args.config = 'pipeline/pipeline_config/default.yaml'
-        else:
-            print(f"[ERRO] Config padrao tambem nao encontrado!")
-            return
-    
-    # Inicializar wrapper do Kiss3DGen
-    print("\n[1/4] Inicializando pipeline Kiss3DGen...")
+    # Inicializar wrapper otimizado
+    print("\n[1/4] Inicializando pipeline Kiss3DGen (modo otimizado)...")
+    log_vram_usage("Antes de inicializar")
     try:
-        k3d_wrapper = init_wrapper_from_config(
+        k3d_wrapper = init_optimized_wrapper(
             args.config,
-            fast_mode=args.fast_mode,
-            disable_llm=args.disable_llm,
-            load_controlnet=args.use_controlnet,
-            load_redux=args.enable_redux,
+            target_vram_gb=args.target_vram,
         )
-        if k3d_wrapper.fast_mode and not args.fast_mode:
-            print("[INFO] Fast mode ativado automaticamente (GPU <= 12GB detectada).")
-            args.enable_redux = False
-        print("[OK] Pipeline inicializado")
+        log_vram_usage("Após inicializar")
+        print("[OK] Pipeline inicializado (modo otimizado)")
     except Exception as e:
         print(f"[ERRO] Falha ao inicializar pipeline: {e}")
         import traceback
@@ -434,20 +293,21 @@ def main():
         }
 
         try:
-            gen_save_path, recon_mesh_path = run_image_to_3d(
-                k3d_wrapper,
+            log_vram_usage(f"Antes de processar {job['label']}")
+            gen_save_path, recon_mesh_path = k3d_wrapper.run_image_to_3d_optimized(
                 str(job["path"]),
                 enable_redux=args.enable_redux,
                 use_mv_rgb=args.use_mv_rgb,
                 use_controlnet=args.use_controlnet,
+                seed=args.seed,
             )
+            log_vram_usage(f"Após processar {job['label']}")
             job_record["success"] = True
             print(f"[OK] Vista {job['label']} concluída.")
         except Exception as exc:
             job_record["error"] = str(exc)
             print(f"[ERRO] Falha na vista {job['label']}: {exc}")
             import traceback
-
             traceback.print_exc()
             history.append(job_record)
             continue
@@ -492,6 +352,10 @@ def main():
         job_record["metrics"] = metrics
         history.append(job_record)
 
+    # Cleanup final
+    k3d_wrapper.cleanup()
+    log_vram_usage("Após cleanup")
+
     history_path = Path(args.output) / "runs_report.json"
     history_path.write_text(json.dumps(history, indent=2, default=str), encoding="utf-8")
 
@@ -499,7 +363,7 @@ def main():
         print("[ERRO] Nenhuma vista foi processada com sucesso. Consulte runs_report.json para detalhes.")
         return
 
-    def _score(result: Dict) -> Tuple[float, int]:
+    def _score(result: Dict) -> tuple:
         if result["metrics"]:
             return (result["metrics"]["chamfer_l1"], result["order"])
         return (float("inf"), result["order"])
@@ -548,7 +412,7 @@ def main():
     if final_metrics_path:
         print(f"Métricas finais: {final_metrics_path}")
     print("\n" + "=" * 60)
-    print("Pipeline concluido!")
+    print("Pipeline concluído!")
     print("=" * 60)
 
 
@@ -557,3 +421,4 @@ if __name__ == "__main__":
         main()
     finally:
         os.chdir(str(ORIGINAL_WORKDIR))
+

@@ -56,7 +56,7 @@ def download_model(repo_id: str, description: str, required: bool = True):
         print(f"[AVISO]  Modelo opcional - pulando download")
         return False
     
-    print(f"📥 Baixando modelo...")
+    print(f"[*] Baixando modelo...")
     print(f"   Isso pode demorar varios minutos e requer espaco em disco...")
     
     try:
@@ -105,7 +105,7 @@ def main():
             results[name] = None
             continue
         
-        print(f"\n📥 Baixando {name}...")
+        print(f"\n[*] Baixando {name}...")
         success = download_model(repo_id, description, required)
         results[name] = success
     

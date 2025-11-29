@@ -13,7 +13,7 @@ import torch
 # Modelos necessários
 REQUIRED_MODELS = {
     "zero123": {
-        "repo_id": "sudo-ai/zero123plus-v1.2",
+        "repo_id": "sudo-ai/zero123plus-v1.1",  # Corrigido: v1.1 é o correto
         "description": "Zero123++ para geracao de multiview",
         "required": True
     },
@@ -118,7 +118,7 @@ def main():
     for name in missing_required:
         print(f"   - {name}: {status[name]['info']['repo_id']}")
     
-    print(f"\n💡 Para baixar modelos, execute:")
+    print(f"\n[INFO] Para baixar modelos, execute:")
     print(f"   python scripts/download_models.py")
     print(f"\n   Ou baixe manualmente usando:")
     for name in missing_required:
