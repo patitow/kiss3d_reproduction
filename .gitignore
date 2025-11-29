@@ -38,10 +38,6 @@ poetry.lock
 *.swo
 *~
 
-# Jupyter Notebook
-.ipynb_checkpoints
-*.ipynb
-
 # Data and Models
 data/
 models/
