@@ -52,3 +52,5 @@ if ($LASTEXITCODE -eq 0) {
     Write-Host "[INFO] Verifique os erros acima" -ForegroundColor Yellow
 }
 
+
+

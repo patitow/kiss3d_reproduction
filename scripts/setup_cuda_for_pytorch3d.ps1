@@ -113,3 +113,5 @@ Write-Host "`n[INFO] Para aplicar estas configuracoes permanentemente:" -Foregro
 Write-Host "  Execute este script antes de compilar PyTorch3D" -ForegroundColor White
 Write-Host "  Ou configure as variaveis de ambiente do sistema" -ForegroundColor White
 
+
+

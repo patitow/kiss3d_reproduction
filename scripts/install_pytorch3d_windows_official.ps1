@@ -122,3 +122,5 @@ if ($LASTEXITCODE -eq 0) {
 
 Set-Location $projectRoot
 
+
+

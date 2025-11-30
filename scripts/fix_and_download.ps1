@@ -26,3 +26,5 @@ Write-Host ""
 Write-Host "[OK] Processo concluído!" -ForegroundColor Green
 Read-Host "Pressione Enter para sair"
 
+
+
