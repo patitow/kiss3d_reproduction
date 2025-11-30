@@ -172,36 +172,83 @@ if vs2019_vcvarsall:
             if include_paths:
                 current_include = os.environ.get("INCLUDE", "")
                 current_include_list = [p.strip() for p in current_include.split(';') if p.strip()] if current_include else []
+                # REMOVER paths do VS 2022 (incompatível com CUDA 12.1)
+                current_include_list = [p for p in current_include_list if "Visual Studio\\2022" not in p and "MSVC\\14.4" not in p]
                 # Adicionar paths do VS 2019 no início
                 for inc_path in include_paths:
                     if inc_path not in current_include_list and os.path.exists(inc_path):
                         current_include_list.insert(0, inc_path)
                 os.environ["INCLUDE"] = ';'.join(current_include_list)
-                print(f"[INFO] INCLUDE configurado com {len(include_paths)} diretórios")
+                print(f"[INFO] INCLUDE configurado com {len(include_paths)} diretórios (VS 2022 removido)")
             
             if lib_paths:
                 current_lib = os.environ.get("LIB", "")
                 current_lib_list = [p.strip() for p in current_lib.split(';') if p.strip()] if current_lib else []
+                # REMOVER paths do VS 2022 (incompatível com CUDA 12.1)
+                current_lib_list = [p for p in current_lib_list if "Visual Studio\\2022" not in p and "MSVC\\14.4" not in p]
                 # Adicionar paths do VS 2019 no início
                 for lib_path in lib_paths:
                     if lib_path not in current_lib_list and os.path.exists(lib_path):
                         current_lib_list.insert(0, lib_path)
                 os.environ["LIB"] = ';'.join(current_lib_list)
-                print(f"[INFO] LIB configurado com {len(lib_paths)} diretórios")
+                print(f"[INFO] LIB configurado com {len(lib_paths)} diretórios (VS 2022 removido)")
             
             if path_paths:
                 current_path = os.environ.get("PATH", "")
                 current_path_list = [p.strip() for p in current_path.split(os.pathsep) if p.strip()]
+                # REMOVER paths do VS 2022 (incompatível com CUDA 12.1)
+                current_path_list = [p for p in current_path_list if "Visual Studio\\2022" not in p and "MSVC\\14.4" not in p]
                 # Adicionar paths do VS 2019 no início (remover duplicatas)
                 for path_item in path_paths:
                     if path_item not in current_path_list:
                         current_path_list.insert(0, path_item)
                 os.environ["PATH"] = os.pathsep.join(current_path_list)
-                print(f"[INFO] PATH atualizado com {len(path_paths)} diretórios do VS 2019")
+                print(f"[INFO] PATH atualizado com {len(path_paths)} diretórios do VS 2019 (VS 2022 removido)")
             
             # Variáveis adicionais críticas
             os.environ["DISTUTILS_USE_SDK"] = "1"
             os.environ["VSCMD_SKIP_SENDTELEMETRY"] = "1"
+            
+            # CRÍTICO: Garantir que cl.exe do VS 2019 está no PATH antes do VS 2022
+            # nvcc procura cl.exe no PATH, então precisamos garantir ordem correta
+            vs2019_cl_path = None
+            for path_item in path_paths:
+                cl_exe = os.path.join(path_item, "cl.exe")
+                if os.path.exists(cl_exe) and "2019" in path_item:
+                    vs2019_cl_path = path_item
+                    break
+            
+            if vs2019_cl_path:
+                # Garantir que VS 2019 cl.exe está ANTES de qualquer VS 2022 no PATH
+                current_path = os.environ.get("PATH", "")
+                path_list = [p.strip() for p in current_path.split(os.pathsep) if p.strip()]
+                # Remover VS 2022
+                path_list = [p for p in path_list if "Visual Studio\\2022" not in p and "MSVC\\14.4" not in p]
+                # Garantir que VS 2019 está no início
+                if vs2019_cl_path in path_list:
+                    path_list.remove(vs2019_cl_path)
+                path_list.insert(0, vs2019_cl_path)
+                os.environ["PATH"] = os.pathsep.join(path_list)
+                print(f"[INFO] cl.exe do VS 2019 priorizado no PATH: {vs2019_cl_path}")
+            
+            # Verificar qual cl.exe será usado
+            try:
+                import subprocess
+                which_cl = subprocess.run(["where", "cl"], capture_output=True, text=True, shell=True, timeout=5)
+                if which_cl.returncode == 0 and which_cl.stdout:
+                    cl_path = which_cl.stdout.strip().split('\n')[0]
+                    if "2019" in cl_path:
+                        print(f"[OK] cl.exe do VS 2019 será usado: {cl_path}")
+                    elif "2022" in cl_path:
+                        print(f"[ERRO] cl.exe do VS 2022 ainda está sendo usado: {cl_path}")
+                        print(f"[INFO] Tentando forçar remoção do VS 2022...")
+                        # Remover VS 2022 do PATH novamente
+                        path_list = [p for p in os.environ.get("PATH", "").split(os.pathsep) if "Visual Studio\\2022" not in p and "MSVC\\14.4" not in p]
+                        os.environ["PATH"] = os.pathsep.join(path_list)
+                    else:
+                        print(f"[AVISO] cl.exe encontrado em local inesperado: {cl_path}")
+            except Exception as e:
+                print(f"[AVISO] Não foi possível verificar qual cl.exe será usado: {e}")
             
             # Verificar se headers padrão estão acessíveis
             test_header = None
