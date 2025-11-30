@@ -8,8 +8,23 @@ import os
 import sys
 from pathlib import Path
 
+# CRÍTICO: Configurar logging IMEDIATAMENTE para capturar tudo
+import logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),  # Saída imediata para stdout
+    ]
+)
+logger = logging.getLogger(__name__)
+logger.info("="*80)
+logger.info("INICIANDO PIPELINE - Kiss3DGen Image to 3D")
+logger.info("="*80)
+
 # CRÍTICO: Configurar VS 2019 e CUDA ANTES de qualquer importação do PyTorch
 project_root = Path(__file__).parent.parent
+logger.info(f"[INIT] Project root: {project_root}")
 
 # Configurar CUDA_HOME - PRIORIZAR CUDA 12.1 (compatível com PyTorch 2.5.1+cu121)
 cuda_base = "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA"
@@ -24,7 +39,7 @@ if cuda_home and os.path.exists(cuda_home):
     for version in preferred_versions:
         if version in cuda_home:
             cuda_found = True
-            print(f"[INFO] CUDA_HOME já configurado com versão preferida: {cuda_home}")
+            logger.info(f"[CUDA] CUDA_HOME já configurado com versão preferida: {cuda_home}")
             break
 
 # Se não encontrou versão preferida, procurar
@@ -35,7 +50,7 @@ if not cuda_found and os.path.exists(cuda_base):
         if os.path.exists(cuda_path) and os.path.exists(os.path.join(cuda_path, "bin", "nvcc.exe")):
             os.environ["CUDA_HOME"] = cuda_path
             os.environ["CUDA_PATH"] = cuda_path
-            print(f"[INFO] CUDA_HOME configurado para {version} (compatível com PyTorch): {cuda_path}")
+            logger.info(f"[CUDA] CUDA_HOME configurado para {version} (compatível com PyTorch): {cuda_path}")
             cuda_found = True
             break
     
@@ -46,8 +61,8 @@ if not cuda_found and os.path.exists(cuda_base):
             if os.path.isdir(cuda_path) and item.startswith("v") and os.path.exists(os.path.join(cuda_path, "bin", "nvcc.exe")):
                 os.environ["CUDA_HOME"] = cuda_path
                 os.environ["CUDA_PATH"] = cuda_path
-                print(f"[AVISO] CUDA_HOME configurado para {item} (pode não ser compatível com PyTorch): {cuda_path}")
-                print(f"[AVISO] PyTorch foi compilado com CUDA 12.1 - considere instalar CUDA 12.1")
+                logger.warning(f"[CUDA] CUDA_HOME configurado para {item} (pode não ser compatível com PyTorch): {cuda_path}")
+                logger.warning(f"[CUDA] PyTorch foi compilado com CUDA 12.1 - considere instalar CUDA 12.1")
                 break
 
 # Adicionar CUDA bin ao PATH
@@ -58,7 +73,7 @@ if cuda_home:
         current_path = os.environ.get("PATH", "")
         path_parts = [p for p in current_path.split(os.pathsep) if "CUDA" not in p or cuda_bin in p]
         os.environ["PATH"] = cuda_bin + os.pathsep + os.pathsep.join(path_parts)
-        print(f"[INFO] CUDA bin adicionado ao PATH: {cuda_bin}")
+        logger.info(f"[CUDA] CUDA bin adicionado ao PATH: {cuda_bin}")
 
 # Configurar VS 2019 ANTES de qualquer importação - USAR VCVARSALL.BAT
 vs_base_paths = [
@@ -295,7 +310,9 @@ if vs2019_vcvarsall:
                     break
 
 if not vs_found:
-    print("[ERRO] VS 2019 não encontrado. Compilação vai falhar.")
+    logger.error("[VS2019] VS 2019 não encontrado. Compilação vai falhar.")
+else:
+    logger.info("[VS2019] Visual Studio 2019 configurado com sucesso")
 
 # Configurar TORCH_CUDA_ARCH_LIST com todas as arquiteturas CUDA comuns
 # Isso evita o warning e garante que todas as arquiteturas sejam compiladas
@@ -314,30 +331,36 @@ cuda_archs = [
 ]
 # PyTorch espera TORCH_CUDA_ARCH_LIST como string separada por espaços
 os.environ["TORCH_CUDA_ARCH_LIST"] = " ".join(cuda_archs)
-print(f"[INFO] TORCH_CUDA_ARCH_LIST configurado com {len(cuda_archs)} arquiteturas CUDA")
-print(f"[INFO] Arquiteturas: {os.environ['TORCH_CUDA_ARCH_LIST']}")
+logger.info(f"[CUDA] TORCH_CUDA_ARCH_LIST configurado com {len(cuda_archs)} arquiteturas CUDA")
+logger.info(f"[CUDA] Arquiteturas: {os.environ['TORCH_CUDA_ARCH_LIST']}")
 
 # Agora importar o resto
 import json
 import shutil
 import argparse
-import logging
 import traceback
 from typing import Dict, Any, Optional, Tuple
 from datetime import datetime
+
+logger.info("[INIT] Importando PyTorch...")
 import torch
+logger.info(f"[INIT] PyTorch {torch.__version__} importado")
+logger.info(f"[INIT] CUDA disponível: {torch.cuda.is_available()}")
+if torch.cuda.is_available():
+    logger.info(f"[INIT] GPU: {torch.cuda.get_device_name(0)}")
+    logger.info(f"[INIT] CUDA Version: {torch.version.cuda}")
+
 from PIL import Image
 
 # Adicionar Kiss3DGen ao path
 sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(project_root / "Kiss3DGen"))
+logger.info(f"[INIT] Paths configurados: {sys.path[:3]}")
 
+logger.info("[INIT] Importando módulos Kiss3DGen...")
 from scripts.kiss3d_wrapper_local import init_wrapper_from_config
 from scripts.kiss3d_utils_local import TMP_DIR
-
-# Configurar logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger.info("[INIT] Módulos Kiss3DGen importados com sucesso")
 
 
 class PipelineCheckpoint:
@@ -552,6 +575,7 @@ def run_image_to_3d_with_checkpoints(
 
 
 def main():
+    logger.info("[MAIN] Iniciando função main()")
     parser = argparse.ArgumentParser(description="Pipeline IMAGE TO 3D - Kiss3DGen com Checkpoints")
     parser.add_argument("--input", type=str, required=True, help="Caminho da imagem de entrada")
     parser.add_argument("--output", type=str, required=True, help="Diretório de saída")
@@ -562,6 +586,7 @@ def main():
     parser.add_argument("--use-mv-rgb", action="store_true", default=True, help="Usar RGB multiview")
     
     args = parser.parse_args()
+    logger.info(f"[MAIN] Argumentos: input={args.input}, output={args.output}, fast_mode={args.fast_mode}, use_controlnet={args.use_controlnet}, enable_redux={args.enable_redux}")
     
     # Configurar paths
     project_root = Path(__file__).parent.parent
@@ -572,7 +597,15 @@ def main():
     if not output_path.is_absolute():
         output_path = project_root / output_path
     
+    logger.info(f"[MAIN] Input path: {input_path}")
+    logger.info(f"[MAIN] Output path: {output_path}")
+    
+    if not input_path.exists():
+        logger.error(f"[MAIN] ERRO: Imagem de entrada não encontrada: {input_path}")
+        sys.exit(1)
+    
     output_path.mkdir(parents=True, exist_ok=True)
+    logger.info(f"[MAIN] Diretório de saída criado/verificado: {output_path}")
     
     # Nome do job baseado na imagem
     job_name = input_path.stem
