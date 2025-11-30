@@ -385,9 +385,15 @@ class kiss3d_wrapper(object):
         ) = self.reconstruct_from_multiview(mv_image)
 
         if use_mv_rgb:
+            # As câmeras de entrada do Zero123++ são [0, 90, 180, 270]
+            # O rearrange organiza as vistas como: [0, 1, 2, 3] = [top-left, top-right, bottom-left, bottom-right]
+            # Mas precisamos alinhar com os azimutes de renderização [270, 0, 90, 180]
+            # Então a ordem correta é [3, 0, 1, 2] para corresponder aos azimutes
+            # NO ENTANTO, se há duplicação, pode ser que o problema esteja na ordem das vistas
+            # Vamos tentar usar a ordem original [0, 1, 2, 3] primeiro para ver se resolve
             ref_3D_bundle_image = torchvision.utils.make_grid(
                 torch.cat(
-                    [rgb_multi_view.squeeze(0).detach().cpu()[[3, 0, 1, 2]], (lrm_multi_view_normals.cpu() + 1) / 2],
+                    [rgb_multi_view.squeeze(0).detach().cpu()[[0, 1, 2, 3]], (lrm_multi_view_normals.cpu() + 1) / 2],
                     dim=0,
                 ),
                 nrow=4,
