@@ -604,7 +604,7 @@ def run_image_to_3d_with_checkpoints(
     logger.info("[INFO] Usando função run_image_to_3d original para reconstrução completa")
     
     # Importar função original
-    from scripts.kiss3d_utils_local import run_image_to_3d
+    from scripts.kiss3d_wrapper_local import run_image_to_3d
     
     checkpoint.mark_stage_start("reconstruction")
     try:
