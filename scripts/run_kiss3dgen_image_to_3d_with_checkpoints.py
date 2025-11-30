@@ -60,7 +60,7 @@ if cuda_home:
         os.environ["PATH"] = cuda_bin + os.pathsep + os.pathsep.join(path_parts)
         print(f"[INFO] CUDA bin adicionado ao PATH: {cuda_bin}")
 
-# Configurar VS 2019 ANTES de qualquer importação
+# Configurar VS 2019 ANTES de qualquer importação - USAR VCVARSALL.BAT
 vs_base_paths = [
     "C:\\Program Files (x86)\\Microsoft Visual Studio",
     "C:\\Program Files\\Microsoft Visual Studio"
@@ -68,41 +68,234 @@ vs_base_paths = [
 
 vs_found = False
 vs_preferred = ["2019"]
+vs2019_vcvarsall = None
 
+# Primeiro tentar encontrar vcvarsall.bat
 for vs_base in vs_base_paths:
     if os.path.exists(vs_base):
         for vs_version in vs_preferred:
             vs_path = os.path.join(vs_base, vs_version)
             if os.path.exists(vs_path):
                 for edition in ["BuildTools", "Community", "Professional", "Enterprise"]:
-                    vc_tools = os.path.join(vs_path, edition, "VC", "Tools", "MSVC")
-                    if os.path.exists(vc_tools):
-                        try:
-                            msvc_versions = sorted([d for d in os.listdir(vc_tools) if os.path.isdir(os.path.join(vc_tools, d))], reverse=True)
-                            if msvc_versions:
-                                cl_path = os.path.join(vc_tools, msvc_versions[0], "bin", "Hostx64", "x64", "cl.exe")
-                                if os.path.exists(cl_path):
-                                    cl_dir = os.path.dirname(cl_path)
-                                    current_path = os.environ.get("PATH", "")
-                                    path_parts = [p for p in current_path.split(os.pathsep) if "Visual Studio" not in p or "2019" in p]
-                                    if cl_dir not in path_parts:
-                                        os.environ["PATH"] = cl_dir + os.pathsep + os.pathsep.join(path_parts)
-                                    else:
-                                        path_parts = [p for p in path_parts if p != cl_dir]
-                                        os.environ["PATH"] = cl_dir + os.pathsep + os.pathsep.join(path_parts)
-                                    print(f"[INFO] VS 2019 configurado: {cl_dir}")
-                                    os.environ["DISTUTILS_USE_SDK"] = "1"
-                                    vs_found = True
-                                    break
-                        except Exception as e:
-                            pass
+                    vcvarsall_path = os.path.join(vs_path, edition, "VC", "Auxiliary", "Build", "vcvarsall.bat")
+                    if os.path.exists(vcvarsall_path):
+                        vs2019_vcvarsall = vcvarsall_path
+                        print(f"[INFO] VS 2019 vcvarsall.bat encontrado: {vcvarsall_path}")
+                        vs_found = True
+                        break
                 if vs_found:
                     break
         if vs_found:
             break
 
+# Se encontrou vcvarsall, executar para configurar ambiente completo
+if vs2019_vcvarsall:
+    try:
+        import subprocess
+        import tempfile
+        
+        # Criar script batch temporário para executar vcvarsall e exportar variáveis
+        # IMPORTANTE: Usar encoding='utf-8' e capturar TODAS as variáveis
+        temp_bat = tempfile.NamedTemporaryFile(mode='w', suffix='.bat', delete=False, encoding='utf-8')
+        temp_bat.write('@echo off\n')
+        temp_bat.write(f'call "{vs2019_vcvarsall}" x64 >nul 2>&1\n')
+        temp_bat.write('set\n')  # Exportar todas as variáveis
+        temp_bat.close()
+        
+        # Executar o batch e capturar output
+        result = subprocess.run(
+            ['cmd', '/c', temp_bat.name],
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+            timeout=20,
+            cwd=os.path.expanduser('~')
+        )
+        
+        # Limpar arquivo temporário
+        try:
+            os.unlink(temp_bat.name)
+        except:
+            pass
+        
+        if result.returncode == 0:
+            # Parsear variáveis de ambiente do output - CRÍTICO para compilação
+            include_paths = []
+            lib_paths = []
+            path_paths = []
+            
+            for line in result.stdout.split('\n'):
+                line = line.strip()
+                if '=' in line and not line.startswith('_') and not line.startswith('PROMPT') and not line.startswith('_='):
+                    try:
+                        key, value = line.split('=', 1)
+                        # Capturar variáveis críticas
+                        if key == 'PATH':
+                            path_paths = [p.strip() for p in value.split(';') if p.strip()]
+                        elif key == 'INCLUDE':
+                            include_paths = [p.strip() for p in value.split(';') if p.strip()]
+                        elif key == 'LIB':
+                            lib_paths = [p.strip() for p in value.split(';') if p.strip()]
+                        elif key == 'LIBPATH':
+                            lib_paths.extend([p.strip() for p in value.split(';') if p.strip()])
+                    except:
+                        pass
+            
+            # Configurar variáveis de ambiente - CRÍTICO para encontrar headers C++
+            if include_paths:
+                current_include = os.environ.get("INCLUDE", "")
+                current_include_list = [p.strip() for p in current_include.split(';') if p.strip()] if current_include else []
+                # Adicionar paths do VS 2019 no início
+                for inc_path in include_paths:
+                    if inc_path not in current_include_list and os.path.exists(inc_path):
+                        current_include_list.insert(0, inc_path)
+                os.environ["INCLUDE"] = ';'.join(current_include_list)
+                print(f"[INFO] INCLUDE configurado com {len(include_paths)} diretórios")
+            
+            if lib_paths:
+                current_lib = os.environ.get("LIB", "")
+                current_lib_list = [p.strip() for p in current_lib.split(';') if p.strip()] if current_lib else []
+                # Adicionar paths do VS 2019 no início
+                for lib_path in lib_paths:
+                    if lib_path not in current_lib_list and os.path.exists(lib_path):
+                        current_lib_list.insert(0, lib_path)
+                os.environ["LIB"] = ';'.join(current_lib_list)
+                print(f"[INFO] LIB configurado com {len(lib_paths)} diretórios")
+            
+            if path_paths:
+                current_path = os.environ.get("PATH", "")
+                current_path_list = [p.strip() for p in current_path.split(os.pathsep) if p.strip()]
+                # Adicionar paths do VS 2019 no início (remover duplicatas)
+                for path_item in path_paths:
+                    if path_item not in current_path_list:
+                        current_path_list.insert(0, path_item)
+                os.environ["PATH"] = os.pathsep.join(current_path_list)
+                print(f"[INFO] PATH atualizado com {len(path_paths)} diretórios do VS 2019")
+            
+            # Variáveis adicionais críticas
+            os.environ["DISTUTILS_USE_SDK"] = "1"
+            os.environ["VSCMD_SKIP_SENDTELEMETRY"] = "1"
+            
+            # Verificar se headers padrão estão acessíveis
+            test_header = None
+            for inc_path in include_paths[:3]:  # Verificar primeiros 3 paths
+                test_header_path = os.path.join(inc_path, "cstddef")
+                if os.path.exists(test_header_path):
+                    test_header = test_header_path
+                    break
+            
+            if test_header:
+                print(f"[OK] Headers C++ padrão encontrados: {test_header}")
+            else:
+                print(f"[AVISO] Headers C++ padrão não encontrados nos primeiros paths")
+                print(f"[INFO] Verificando manualmente...")
+                # Tentar encontrar manualmente
+                for inc_path in include_paths:
+                    if "MSVC" in inc_path and os.path.exists(inc_path):
+                        test_files = ["cstddef", "limits.h", "iostream"]
+                        found = sum(1 for f in test_files if os.path.exists(os.path.join(inc_path, f)))
+                        if found > 0:
+                            print(f"[OK] Encontrados {found}/{len(test_files)} headers em {inc_path}")
+            
+            print(f"[OK] VS 2019 ambiente configurado via vcvarsall.bat")
+        else:
+            print(f"[AVISO] vcvarsall.bat retornou código {result.returncode}")
+            print(f"[INFO] Tentando configuração manual do PATH")
+            vs_found = False
+            # Fallback: configuração manual
+            for vs_base in vs_base_paths:
+                if os.path.exists(vs_base):
+                    for vs_version in vs_preferred:
+                        vs_path = os.path.join(vs_base, vs_version)
+                        if os.path.exists(vs_path):
+                            for edition in ["BuildTools", "Community", "Professional", "Enterprise"]:
+                                vc_tools = os.path.join(vs_path, edition, "VC", "Tools", "MSVC")
+                                if os.path.exists(vc_tools):
+                                    try:
+                                        msvc_versions = sorted([d for d in os.listdir(vc_tools) if os.path.isdir(os.path.join(vc_tools, d))], reverse=True)
+                                        if msvc_versions:
+                                            cl_path = os.path.join(vc_tools, msvc_versions[0], "bin", "Hostx64", "x64", "cl.exe")
+                                            if os.path.exists(cl_path):
+                                                cl_dir = os.path.dirname(cl_path)
+                                                include_dir = os.path.join(vc_tools, msvc_versions[0], "include")
+                                                lib_dir = os.path.join(vc_tools, msvc_versions[0], "lib", "x64")
+                                                
+                                                current_path = os.environ.get("PATH", "")
+                                                path_parts = [p for p in current_path.split(os.pathsep) if "Visual Studio" not in p or "2019" in p]
+                                                if cl_dir not in path_parts:
+                                                    os.environ["PATH"] = cl_dir + os.pathsep + os.pathsep.join(path_parts)
+                                                
+                                                current_include = os.environ.get("INCLUDE", "")
+                                                if include_dir and os.path.exists(include_dir):
+                                                    if include_dir not in current_include:
+                                                        os.environ["INCLUDE"] = include_dir + os.pathsep + current_include if current_include else include_dir
+                                                
+                                                current_lib = os.environ.get("LIB", "")
+                                                if lib_dir and os.path.exists(lib_dir):
+                                                    if lib_dir not in current_lib:
+                                                        os.environ["LIB"] = lib_dir + os.pathsep + current_lib if current_lib else lib_dir
+                                                
+                                                print(f"[INFO] VS 2019 configurado manualmente: {cl_dir}")
+                                                os.environ["DISTUTILS_USE_SDK"] = "1"
+                                                vs_found = True
+                                                break
+                                    except Exception as e2:
+                                        pass
+                            if vs_found:
+                                break
+                    if vs_found:
+                        break
+    except Exception as e:
+        print(f"[AVISO] Erro ao configurar VS 2019: {e}")
+        print(f"[INFO] Tentando configuração manual do PATH")
+        vs_found = False
+        # Fallback: configuração manual
+        for vs_base in vs_base_paths:
+            if os.path.exists(vs_base):
+                for vs_version in vs_preferred:
+                    vs_path = os.path.join(vs_base, vs_version)
+                    if os.path.exists(vs_path):
+                        for edition in ["BuildTools", "Community", "Professional", "Enterprise"]:
+                            vc_tools = os.path.join(vs_path, edition, "VC", "Tools", "MSVC")
+                            if os.path.exists(vc_tools):
+                                try:
+                                    msvc_versions = sorted([d for d in os.listdir(vc_tools) if os.path.isdir(os.path.join(vc_tools, d))], reverse=True)
+                                    if msvc_versions:
+                                        cl_path = os.path.join(vc_tools, msvc_versions[0], "bin", "Hostx64", "x64", "cl.exe")
+                                        if os.path.exists(cl_path):
+                                            cl_dir = os.path.dirname(cl_path)
+                                            include_dir = os.path.join(vc_tools, msvc_versions[0], "include")
+                                            lib_dir = os.path.join(vc_tools, msvc_versions[0], "lib", "x64")
+                                            
+                                            current_path = os.environ.get("PATH", "")
+                                            path_parts = [p for p in current_path.split(os.pathsep) if "Visual Studio" not in p or "2019" in p]
+                                            if cl_dir not in path_parts:
+                                                os.environ["PATH"] = cl_dir + os.pathsep + os.pathsep.join(path_parts)
+                                            
+                                            current_include = os.environ.get("INCLUDE", "")
+                                            if include_dir and os.path.exists(include_dir):
+                                                if include_dir not in current_include:
+                                                    os.environ["INCLUDE"] = include_dir + os.pathsep + current_include if current_include else include_dir
+                                            
+                                            current_lib = os.environ.get("LIB", "")
+                                            if lib_dir and os.path.exists(lib_dir):
+                                                if lib_dir not in current_lib:
+                                                    os.environ["LIB"] = lib_dir + os.pathsep + current_lib if current_lib else lib_dir
+                                            
+                                            print(f"[INFO] VS 2019 configurado manualmente: {cl_dir}")
+                                            os.environ["DISTUTILS_USE_SDK"] = "1"
+                                            vs_found = True
+                                            break
+                                except Exception as e2:
+                                    pass
+                        if vs_found:
+                            break
+                if vs_found:
+                    break
+
 if not vs_found:
-    print("[AVISO] VS 2019 não encontrado. Compilação pode falhar.")
+    print("[ERRO] VS 2019 não encontrado. Compilação vai falhar.")
 
 # Agora importar o resto
 import json
