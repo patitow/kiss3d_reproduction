@@ -297,6 +297,26 @@ if vs2019_vcvarsall:
 if not vs_found:
     print("[ERRO] VS 2019 não encontrado. Compilação vai falhar.")
 
+# Configurar TORCH_CUDA_ARCH_LIST com todas as arquiteturas CUDA comuns
+# Isso evita o warning e garante que todas as arquiteturas sejam compiladas
+# Arquiteturas CUDA: 6.0, 6.1, 6.2 (Pascal), 7.0, 7.5 (Volta/Turing), 8.0, 8.6, 8.9 (Ampere/Ada), 9.0, 9.0a (Hopper)
+cuda_archs = [
+    "6.0",   # Pascal (GTX 1080, Titan X)
+    "6.1",   # Pascal (GTX 1080 Ti, Titan Xp)
+    "6.2",   # Pascal (Tesla P100)
+    "7.0",   # Volta (V100)
+    "7.5",   # Turing (RTX 2080, RTX 2070, GTX 1660)
+    "8.0",   # Ampere (A100, RTX 3090, RTX 3080)
+    "8.6",   # Ampere (RTX 3060, RTX 3050)
+    "8.9",   # Ada Lovelace (RTX 4090, RTX 4080)
+    "9.0",   # Hopper (H100)
+    "9.0a",  # Hopper (H100 with additional features)
+]
+# PyTorch espera TORCH_CUDA_ARCH_LIST como string separada por espaços
+os.environ["TORCH_CUDA_ARCH_LIST"] = " ".join(cuda_archs)
+print(f"[INFO] TORCH_CUDA_ARCH_LIST configurado com {len(cuda_archs)} arquiteturas CUDA")
+print(f"[INFO] Arquiteturas: {os.environ['TORCH_CUDA_ARCH_LIST']}")
+
 # Agora importar o resto
 import json
 import shutil
