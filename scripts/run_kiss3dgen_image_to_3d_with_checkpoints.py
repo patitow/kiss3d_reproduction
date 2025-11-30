@@ -10,6 +10,17 @@ from pathlib import Path
 
 # CRÍTICO: Configurar logging IMEDIATAMENTE para capturar tudo
 import logging
+import warnings
+
+# Suprimir warnings comuns e não críticos ANTES de qualquer importação
+warnings.filterwarnings('ignore', message='.*Some weights of.*were not used.*')
+warnings.filterwarnings('ignore', message='.*text_projection.*')
+warnings.filterwarnings('ignore', message='.*add_prefix_space.*')
+warnings.filterwarnings('ignore', message='.*The tokenizer.*needs to be converted.*')
+warnings.filterwarnings('ignore', message='.*TRANSFORMERS_CACHE.*')
+warnings.filterwarnings('ignore', message='.*pkg_resources is deprecated.*')
+warnings.filterwarnings('ignore', message='.*_get_vc_env is private.*')
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',

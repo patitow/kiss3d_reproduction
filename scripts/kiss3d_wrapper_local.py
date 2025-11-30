@@ -5,10 +5,20 @@ import random
 import torch
 import yaml
 import uuid
+import warnings
 from typing import Union, Any, Dict
 from einops import rearrange
 from PIL import Image
 import time
+
+# Suprimir warnings comuns e não críticos
+warnings.filterwarnings('ignore', message='.*Some weights of.*were not used.*')
+warnings.filterwarnings('ignore', message='.*text_projection.*')
+warnings.filterwarnings('ignore', message='.*add_prefix_space.*')
+warnings.filterwarnings('ignore', message='.*The tokenizer.*needs to be converted.*')
+warnings.filterwarnings('ignore', message='.*TRANSFORMERS_CACHE.*')
+warnings.filterwarnings('ignore', message='.*pkg_resources is deprecated.*')
+warnings.filterwarnings('ignore', message='.*_get_vc_env is private.*')
 
 import torchvision
 from torchvision.transforms import functional as TF
