@@ -591,14 +591,21 @@ class kiss3d_wrapper(object):
                 except Exception as e2:
                     logger.error(f"[REDUX] Erro crítico ao mover pipeline: {e2}")
             
+            prompt_primary = hparam_dict.get("prompt")
+            prompt_secondary = hparam_dict.get("prompt_2")
+
             redux_hparam_ = {
-                "prompt": hparam_dict.pop("prompt"),
-                "prompt_2": hparam_dict.pop("prompt_2"),
+                "prompt": prompt_primary,
+                "prompt_2": prompt_secondary,
             }
             redux_hparam_.update(redux_hparam)
 
             with self.context():
                 self.flux_redux_pipeline(**redux_hparam_)
+
+            # Recolocar prompts para uso pela pipeline principal
+            hparam_dict["prompt"] = prompt_primary
+            hparam_dict["prompt_2"] = prompt_secondary
 
         control_mode_idx = [control_mode_dict[mode] for mode in control_mode]
 

@@ -586,14 +586,16 @@ def save_py3dmesh_with_trimesh_fast_local(
                 
                 logger.info(f"Exportando mesh com textura UV ({texture_resolution}x{texture_resolution})")
                 mesh.export(save_glb_path)
-                
+                # Se exportou com textura, não precisamos do fix_vert_color_glb que é para vertex colors
+                return
+            
             except Exception as e:
                 logger.warning(f"Falha ao criar textura UV, usando vertex colors: {e}")
                 # Fallback para vertex colors
                 mesh = trimesh.Trimesh(vertices=vertices, faces=triangles, vertex_colors=np_color)
                 mesh.remove_unreferenced_vertices()
                 mesh.export(save_glb_path)
-                
+            
         except Exception as e:
             logger.warning(f"Erro ao processar mesh com textura, usando método básico: {e}")
             # Fallback completo
@@ -605,8 +607,8 @@ def save_py3dmesh_with_trimesh_fast_local(
         mesh = trimesh.Trimesh(vertices=vertices, faces=triangles, vertex_colors=np_color)
         mesh.remove_unreferenced_vertices()
         mesh.export(save_glb_path)
-    
-    # Fix material para GLB
+
+# Fix material para GLB (apenas se não tiver textura/tiver falhado)
     if save_glb_path.endswith(".glb"):
         fix_vert_color_glb(save_glb_path)
 
