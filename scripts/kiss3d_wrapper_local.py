@@ -261,6 +261,55 @@ class kiss3d_wrapper(object):
                 exc,
             )
 
+    def _move_mesh_to_device(self, vertices, faces, device):
+        def _to_tensor(data):
+            if isinstance(data, torch.Tensor):
+                return data.to(device)
+            if isinstance(data, np.ndarray):
+                return torch.from_numpy(data).to(device)
+            raise TypeError(f"Tipo inesperado para mesh: {type(data)}")
+
+        return _to_tensor(vertices), _to_tensor(faces)
+
+    def _build_flux_seed_bundle(self, input_image: Image.Image) -> torch.Tensor:
+        flux_device = torch.device(self.config["flux"].get("device", "cpu"))
+        view_h = max(64, self.flux_height // 2)
+        view_w = max(64, self.flux_width // 4)
+
+        base = TF.to_tensor(input_image).to(flux_device)
+        base = TF.resize(base, [view_h, view_w], antialias=True).clamp(0.0, 1.0)
+
+        variations = []
+        for idx in range(4):
+            view = base.clone()
+            if idx == 1:
+                view = TF.hflip(view)
+            elif idx == 2:
+                view = TF.adjust_hue(view, 0.08)
+            elif idx == 3:
+                view = TF.adjust_saturation(view, 1.15)
+            variations.append(view.clamp(0.0, 1.0))
+
+        seed_grid = torch.zeros(
+            (1, 3, self.flux_height, self.flux_width),
+            device=flux_device,
+            dtype=base.dtype,
+        )
+
+        for idx, view in enumerate(variations):
+            col = idx * view_w
+            seed_grid[:, :, :view_h, col : col + view_w] = view.unsqueeze(0)
+
+            normals = view.clone()
+            normals = (normals - normals.amin(dim=(-2, -1), keepdim=True)) / (
+                normals.amax(dim=(-2, -1), keepdim=True) - normals.amin(dim=(-2, -1), keepdim=True) + 1e-6
+            )
+            normals = normals * 0.6 + 0.2
+            seed_grid[:, :, view_h:, col : col + view_w] = normals.unsqueeze(0)
+
+        self._assert_no_duplicate_views(seed_grid.squeeze(0), stage_name="flux_seed_bundle", similarity_threshold=0.999)
+        return seed_grid.clamp(0.0, 1.0)
+
     def get_image_caption(self, image):
         if self.caption_model is None:
             raise RuntimeError("Caption model is None! Make sure it was loaded correctly.")
@@ -564,6 +613,195 @@ class kiss3d_wrapper(object):
             return ref_3D_bundle_image, save_path
 
         return ref_3D_bundle_image
+
+    def run_multiview_pipeline(
+        self,
+        input_image: Image.Image,
+        reconstruction_stage2_steps: int | None = None,
+        save_intermediate_results: bool = True,
+        use_mv_rgb: bool = True,
+    ):
+        recon_device = self.config["reconstruction"].get("device", "cpu")
+        reconstruction_stage2_steps = reconstruction_stage2_steps or self.get_reconstruction_stage2_steps()
+
+        mv_image = self.generate_multiview(input_image)
+        mv_path = os.path.join(TMP_DIR, f"{self.uuid}_mv_image.png")
+        mv_image.save(mv_path)
+
+        (
+            rgb_multi_view,
+            vertices,
+            faces,
+            lrm_multi_view_normals,
+            lrm_multi_view_rgb,
+            _,
+        ) = self.reconstruct_from_multiview(mv_image)
+        self.offload_multiview_pipeline()
+
+        rgb_source = rgb_multi_view.squeeze(0) if use_mv_rgb else lrm_multi_view_rgb
+        rgb_views = rgb_source
+        if rgb_views.shape[0] < 4:
+            raise RuntimeError(f"Esperado ao menos 4 vistas do Zero123++, recebido {rgb_views.shape[0]}")
+        rgb_views = rgb_views[:4].to(recon_device)
+
+        normal_views = lrm_multi_view_normals[:4]
+        normal_views = ((normal_views + 1.0) / 2.0).clamp(0.0, 1.0).to(recon_device)
+
+        from utils.tool import get_background
+
+        multi_view_mask = get_background(normal_views.cpu()).to(recon_device)
+        rgb_views = rgb_views * multi_view_mask + (1 - multi_view_mask)
+
+        vertices, faces = self._move_mesh_to_device(vertices, faces, recon_device)
+
+        stage1_steps = max(15, reconstruction_stage2_steps // 4)
+        save_paths = [
+            os.path.join(OUT_DIR, f"{self.uuid}.glb"),
+            os.path.join(OUT_DIR, f"{self.uuid}.obj"),
+        ]
+
+        isomer_reconstruct(
+            rgb_multi_view=rgb_views,
+            normal_multi_view=normal_views,
+            multi_view_mask=multi_view_mask,
+            vertices=vertices,
+            faces=faces,
+            save_paths=save_paths,
+            radius=4.15,
+            azimuths=[0, 90, 180, 270],
+            elevations=[5, 5, 5, 5],
+            reconstruction_stage1_steps=stage1_steps,
+            reconstruction_stage2_steps=reconstruction_stage2_steps,
+            geo_weights=[1.0, 0.95, 1.0, 0.95],
+            color_weights=[1.0, 0.7, 1.0, 0.7],
+        )
+        _empty_cuda_cache()
+
+        bundle_preview = None
+        if save_intermediate_results:
+            bundle_tensor = torchvision.utils.make_grid(
+                torch.cat([rgb_views.cpu(), normal_views.cpu()], dim=0),
+                nrow=4,
+                padding=0,
+            )
+            bundle_preview = os.path.join(TMP_DIR, f"{self.uuid}_multiview_bundle.png")
+            torchvision.utils.save_image(bundle_tensor, bundle_preview)
+
+        return save_paths[0], save_paths[1], bundle_preview or mv_path
+
+    def generate_flux_bundle(
+        self,
+        input_image: Image.Image,
+        caption: str,
+        enable_redux: bool = True,
+        use_controlnet: bool = True,
+    ):
+        flux_device = self.config["flux"].get("device", "cpu")
+        flux_seed = self._build_flux_seed_bundle(input_image).to(flux_device)
+        seed_path = os.path.join(TMP_DIR, f"{self.uuid}_flux_seed_bundle.png")
+        torchvision.utils.save_image(flux_seed, seed_path)
+
+        redux_hparam = None
+        if enable_redux and self.flux_redux_pipeline is not None:
+            redux_hparam = {
+                "image": self.to_512_tensor(input_image).unsqueeze(0).clip(0.0, 1.0).to(flux_device),
+                "prompt_embeds_scale": 1.0,
+                "pooled_prompt_embeds_scale": 1.0,
+                "strength": 0.5,
+            }
+
+        flux_cfg = self.config.get("flux", {})
+
+        def _expand_sequence(value, default, target_len):
+            if isinstance(value, (list, tuple)):
+                seq = list(value)
+            else:
+                seq = [value if value is not None else default]
+            if not seq:
+                seq = [default]
+            while len(seq) < target_len:
+                seq.append(seq[-1])
+            return seq
+
+        if use_controlnet and self.flux_pipeline and hasattr(self.flux_pipeline, "controlnet"):
+            control_mode = flux_cfg.get("controlnet_modes", ["tile"])
+            control_kernel = flux_cfg.get("controlnet_kernel_size", 51)
+            control_sigma = flux_cfg.get("controlnet_sigma", 2.0)
+            control_downscale = flux_cfg.get("controlnet_down_scale", 1)
+            control_guidance_start = flux_cfg.get("controlnet_guidance_start", 0.0)
+            control_guidance_end = flux_cfg.get("controlnet_guidance_end", 0.65)
+            controlnet_conditioning_scale = flux_cfg.get("controlnet_conditioning_scale", 0.6)
+
+            control_mode = list(control_mode) if isinstance(control_mode, (list, tuple)) else [control_mode]
+            control_guidance_start = _expand_sequence(control_guidance_start, 0.0, len(control_mode))
+            control_guidance_end = _expand_sequence(control_guidance_end, 0.65, len(control_mode))
+            controlnet_conditioning_scale = _expand_sequence(
+                controlnet_conditioning_scale,
+                0.6,
+                len(control_mode),
+            )
+
+            control_images = [
+                self.preprocess_controlnet_cond_image(
+                    flux_seed,
+                    mode_,
+                    down_scale=control_downscale,
+                    kernel_size=control_kernel,
+                    sigma=control_sigma,
+                )
+                for mode_ in control_mode
+            ]
+            control_dtype = getattr(self.flux_pipeline.controlnet, "dtype", flux_seed.dtype)
+            control_images = [
+                TF.resize(img, [self.flux_height, self.flux_width], antialias=True)
+                .to(device=flux_device, dtype=control_dtype)
+                for img in control_images
+            ]
+
+            bundle_tensor, bundle_path = self.generate_3d_bundle_image_controlnet(
+                prompt=caption,
+                image=flux_seed,
+                strength=0.95,
+                control_image=control_images,
+                control_mode=control_mode,
+                control_guidance_start=control_guidance_start,
+                control_guidance_end=control_guidance_end,
+                controlnet_conditioning_scale=controlnet_conditioning_scale,
+                lora_scale=1.0,
+                redux_hparam=redux_hparam,
+            )
+        else:
+            bundle_tensor, bundle_path = self.generate_3d_bundle_image_text(
+                prompt=caption,
+                image=flux_seed,
+                strength=0.95,
+                lora_scale=1.0,
+                redux_hparam=redux_hparam,
+            )
+
+        self.offload_flux_pipelines()
+        return bundle_tensor, bundle_path
+
+    def run_flux_pipeline(
+        self,
+        input_image: Image.Image,
+        caption: str,
+        enable_redux: bool = True,
+        use_controlnet: bool = True,
+        reconstruction_stage2_steps: int | None = None,
+    ):
+        bundle_tensor, bundle_path = self.generate_flux_bundle(
+            input_image=input_image,
+            caption=caption,
+            enable_redux=enable_redux,
+            use_controlnet=use_controlnet,
+        )
+        mesh_path = self.reconstruct_3d_bundle_image(
+            bundle_tensor,
+            reconstruction_stage2_steps=reconstruction_stage2_steps or self.get_reconstruction_stage2_steps(),
+            save_intermediate_results=True,
+        )
+        return bundle_path, mesh_path
 
     def generate_3d_bundle_image_controlnet(
         self,
@@ -1443,132 +1681,43 @@ def init_wrapper_from_config(
     )
 
 
-def run_image_to_3d(k3d_wrapper, input_image_path, enable_redux=True, use_mv_rgb=True, use_controlnet=True):
+def run_image_to_3d(
+    k3d_wrapper,
+    input_image_path,
+    enable_redux=True,
+    use_mv_rgb=True,
+    use_controlnet=True,
+    pipeline_mode: str = "flux",
+):
     k3d_wrapper.renew_uuid()
 
     input_image = preprocess_input_image(Image.open(input_image_path))
     input_image.save(os.path.join(TMP_DIR, f"{k3d_wrapper.uuid}_input_image.png"))
 
-    reference_3d_bundle_image, reference_save_path = k3d_wrapper.generate_reference_3D_bundle_image_zero123(
-        input_image, use_mv_rgb=use_mv_rgb
-    )
-    k3d_wrapper.offload_multiview_pipeline()
     caption = k3d_wrapper.get_image_caption(input_image)
     k3d_wrapper.release_text_models()
 
-    if enable_redux:
-        redux_hparam = {
-            "image": k3d_wrapper.to_512_tensor(input_image).unsqueeze(0).clip(0.0, 1.0),
-            "prompt_embeds_scale": 1.0,
-            "pooled_prompt_embeds_scale": 1.0,
-            "strength": 0.5,
-        }
-    else:
-        redux_hparam = None
+    if pipeline_mode == "multiview":
+        mesh_glb, mesh_obj, _ = k3d_wrapper.run_multiview_pipeline(
+            input_image,
+            reconstruction_stage2_steps=k3d_wrapper.get_reconstruction_stage2_steps(),
+            save_intermediate_results=True,
+            use_mv_rgb=use_mv_rgb,
+        )
+        return None, mesh_glb or mesh_obj
 
-    flux_cfg = k3d_wrapper.config.get("flux", {})
-
-    def _expand_sequence(value, default, target_len):
-        if isinstance(value, (list, tuple)):
-            seq = list(value)
-        else:
-            seq = [value]
-        if not seq:
-            seq = [default]
-        while len(seq) < target_len:
-            seq.append(seq[-1])
-        return seq
-
-    flux_ready_image = TF.resize(
-        reference_3d_bundle_image,
-        [k3d_wrapper.flux_height, k3d_wrapper.flux_width],
-        antialias=True,
-    ).unsqueeze(0).clamp(0.0, 1.0)
-    logger.info(
-        "Flux input ajustado para %dx%d",
-        k3d_wrapper.flux_height,
-        k3d_wrapper.flux_width,
+    bundle_tensor, bundle_path = k3d_wrapper.generate_flux_bundle(
+        input_image=input_image,
+        caption=caption,
+        enable_redux=enable_redux,
+        use_controlnet=use_controlnet,
     )
-    logger.info("Flux input resized to %s", tuple(flux_ready_image.shape))
-
-    if use_controlnet:
-        control_mode = flux_cfg.get("controlnet_modes", ["tile"])
-        control_kernel = flux_cfg.get("controlnet_kernel_size", 51)
-        control_sigma = flux_cfg.get("controlnet_sigma", 2.0)
-        control_downscale = flux_cfg.get("controlnet_down_scale", 1)
-        control_guidance_start = flux_cfg.get("controlnet_guidance_start", 0.0)
-        control_guidance_end = flux_cfg.get("controlnet_guidance_end", 0.65)
-        controlnet_conditioning_scale = flux_cfg.get("controlnet_conditioning_scale", 0.6)
-
-        control_mode = list(control_mode) if isinstance(control_mode, (list, tuple)) else [control_mode]
-        if k3d_wrapper.fast_mode and len(control_mode) > 1:
-            logger.info(
-                "Fast mode ativo: reduzindo controlnet_modes de %s para %s",
-                control_mode,
-                control_mode[:1],
-            )
-            control_mode = control_mode[:1]
-        control_guidance_start = _expand_sequence(control_guidance_start, 0.0, len(control_mode))
-        control_guidance_end = _expand_sequence(control_guidance_end, 0.65, len(control_mode))
-        controlnet_conditioning_scale = _expand_sequence(
-            controlnet_conditioning_scale, 0.6, len(control_mode)
-        )
-
-        control_image = [
-            k3d_wrapper.preprocess_controlnet_cond_image(
-                reference_3d_bundle_image,
-                mode_,
-                down_scale=control_downscale,
-                kernel_size=control_kernel,
-                sigma=control_sigma,
-            )
-            for mode_ in control_mode
-        ]
-        control_dtype = getattr(k3d_wrapper.flux_pipeline.controlnet, "dtype", flux_ready_image.dtype)
-        control_image = [
-            TF.resize(img, [k3d_wrapper.flux_height, k3d_wrapper.flux_width], antialias=True).to(
-                dtype=control_dtype
-            )
-            for img in control_image
-        ]
-
-        gen_3d_bundle_image, gen_save_path = k3d_wrapper.generate_3d_bundle_image_controlnet(
-            prompt=caption,
-            image=flux_ready_image,
-            strength=0.95,
-            control_image=control_image,
-            control_mode=control_mode,
-            control_guidance_start=control_guidance_start,
-            control_guidance_end=control_guidance_end,
-            controlnet_conditioning_scale=controlnet_conditioning_scale,
-            lora_scale=1.0,
-            redux_hparam=redux_hparam,
-        )
-    else:
-        gen_3d_bundle_image, gen_save_path = k3d_wrapper.generate_3d_bundle_image_text(
-            prompt=caption,
-            image=flux_ready_image,
-            strength=0.95,
-            lora_scale=1.0,
-            redux_hparam=redux_hparam,
-        )
-
-    k3d_wrapper.offload_flux_pipelines()
-
-    # O gen_3d_bundle_image tem shape (1, 3, H, W) - é um grid 2x4 visualmente
-    # Precisamos garantir que está no formato correto para reconstruct_3d_bundle_image
-    if gen_3d_bundle_image.dim() == 4:
-        # Remover batch dimension se necessário
-        if gen_3d_bundle_image.shape[0] == 1:
-            gen_3d_bundle_image = gen_3d_bundle_image.squeeze(0)  # (1, 3, H, W) -> (3, H, W)
-    
     recon_mesh_path = k3d_wrapper.reconstruct_3d_bundle_image(
-        gen_3d_bundle_image,
-        save_intermediate_results=False,
+        bundle_tensor,
+        save_intermediate_results=True,
         isomer_radius=4.15,
         reconstruction_stage2_steps=k3d_wrapper.get_reconstruction_stage2_steps(),
     )
-
-    return gen_save_path, recon_mesh_path
+    return bundle_path, recon_mesh_path
 
 

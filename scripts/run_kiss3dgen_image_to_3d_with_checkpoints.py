@@ -519,117 +519,134 @@ def run_image_to_3d_with_checkpoints(
     enable_redux: bool = True,
     use_mv_rgb: bool = True,
     use_controlnet: bool = True,
+    pipeline_mode: str = "flux",
 ) -> Tuple[Optional[str], Optional[str]]:
     """
     Executa pipeline com sistema de checkpoints
     Retorna: (bundle_path, mesh_path)
     """
+    from scripts.kiss3d_utils_local import preprocess_input_image
     from PIL import Image
-    
+
     input_image_path = Path(input_image_path)
     if not input_image_path.exists():
         raise FileNotFoundError(f"Imagem não encontrada: {input_image_path}")
-    
-    # Seguir ordem do pipeline original: primeiro multiview, depois caption
-    from scripts.kiss3d_utils_local import preprocess_input_image
-    
+
     input_image = preprocess_input_image(Image.open(input_image_path))
     input_image.save(os.path.join(TMP_DIR, f"{k3d_wrapper.uuid}_input_image.png"))
-    
-    # Etapa 1: Multiview + Bundle 3D (gerados juntos)
-    checkpoint.mark_stage_start("multiview")
-    checkpoint.mark_stage_start("bundle_3d")
-    try:
-        logger.info("[ETAPA 1/4] Gerando multiview e bundle 3D...")
-        ref_3d_bundle_image, reference_save_path = k3d_wrapper.generate_reference_3D_bundle_image_zero123(
-            input_image,
-            use_mv_rgb=use_mv_rgb,
-            save_intermediate_results=True
-        )
-        
-        # Salvar multiview (gerado internamente)
-        mv_files = list(Path(TMP_DIR).glob(f"{k3d_wrapper.uuid}_mv_image.png"))
-        if mv_files:
-            mv_file = checkpoint.save_file("multiview", "multiview.png", mv_files[0])
-            logger.info(f"[OK] Multiview gerado: {mv_file}")
-            checkpoint.mark_stage_success("multiview", str(mv_file))
-        else:
-            logger.warning("[AVISO] Multiview não encontrado no TMP_DIR")
-            checkpoint.mark_stage_success("multiview", None)
-        
-        # Salvar bundle 3D
-        bundle_files = list(Path(TMP_DIR).glob(f"{k3d_wrapper.uuid}_ref_3d_bundle_image.png"))
-        if bundle_files:
-            bundle_file = checkpoint.save_file("bundle_3d", "bundle_3d.png", bundle_files[0])
-            logger.info(f"[OK] Bundle 3D gerado: {bundle_file}")
-            checkpoint.mark_stage_success("bundle_3d", str(bundle_file))
-        else:
-            logger.warning("[AVISO] Bundle 3D não encontrado no TMP_DIR")
-            checkpoint.mark_stage_success("bundle_3d", None)
-        
-        # Descarregar multiview pipeline para liberar VRAM
-        k3d_wrapper.offload_multiview_pipeline()
-    except Exception as e:
-        error_msg = f"Erro ao gerar multiview/bundle 3D: {e}"
-        checkpoint.mark_stage_error("multiview", error_msg, traceback.format_exc())
-        checkpoint.mark_stage_error("bundle_3d", error_msg, traceback.format_exc())
-        raise
-    
-    # Etapa 2: Caption
+
+    # Captions agora independem do multiview
     checkpoint.mark_stage_start("caption")
     try:
-        logger.info("[ETAPA 2/4] Gerando caption...")
+        logger.info("[ETAPA 1/3] Gerando caption diretamente da imagem...")
         caption = k3d_wrapper.get_image_caption(input_image)
-        logger.info(f"[OK] Caption gerado: {caption[:100]}...")
-        
-        # Salvar caption
+        logger.info(f"[OK] Caption gerado: {caption[:160]}...")
+
         caption_file = checkpoint.checkpoint_dir / "caption" / "caption.txt"
-        caption_file.parent.mkdir(exist_ok=True)
-        caption_file.write_text(caption, encoding='utf-8')
-        checkpoint.mark_stage_success("caption", str(caption_file), {"caption_preview": caption[:200]})
-        
-        # Liberar modelos de texto
+        caption_file.parent.mkdir(parents=True, exist_ok=True)
+        caption_file.write_text(caption, encoding="utf-8")
+        checkpoint.mark_stage_success(
+            "caption",
+            str(caption_file),
+            {"caption_preview": caption[:256], "pipeline_mode": pipeline_mode},
+        )
         k3d_wrapper.release_text_models()
-    except Exception as e:
-        error_msg = f"Erro ao gerar caption: {e}"
+    except Exception as exc:
+        error_msg = f"Erro ao gerar caption: {exc}"
         checkpoint.mark_stage_error("caption", error_msg, traceback.format_exc())
         raise
-    
-    # Etapa 3: Gerar bundle final com Flux (se necessário)
-    # Esta etapa é opcional e pode ser feita depois
-    
-    # Etapa 4: Reconstrução final (usando run_image_to_3d completo)
-    # Por enquanto, vamos usar a função original que já faz tudo
-    logger.info("[ETAPA 3/4] Pipeline completo em execução...")
-    logger.info("[INFO] Usando função run_image_to_3d original para reconstrução completa")
-    
-    # Importar função original
-    from scripts.kiss3d_wrapper_local import run_image_to_3d
-    
-    checkpoint.mark_stage_start("reconstruction")
-    try:
-        gen_save_path, recon_mesh_path = run_image_to_3d(
-            k3d_wrapper,
-            str(input_image_path),
-            enable_redux=enable_redux,
-            use_mv_rgb=use_mv_rgb,
-            use_controlnet=use_controlnet,
-        )
-        
-        # Salvar mesh final
-        if recon_mesh_path and Path(recon_mesh_path).exists():
-            mesh_file = checkpoint.save_file("reconstruction", Path(recon_mesh_path).name, Path(recon_mesh_path))
-            logger.info(f"[OK] Mesh reconstruído: {mesh_file}")
-            checkpoint.mark_stage_success("reconstruction", str(mesh_file))
-        else:
-            logger.warning("[AVISO] Mesh não encontrado")
-            checkpoint.mark_stage_success("reconstruction", None)
-        
-        return gen_save_path, recon_mesh_path
-    except Exception as e:
-        error_msg = f"Erro ao reconstruir mesh: {e}"
-        checkpoint.mark_stage_error("reconstruction", error_msg, traceback.format_exc())
-        raise
+
+    recon_stage = "reconstruction"
+    bundle_stage = "bundle_3d"
+    bundle_save_path = None
+    mesh_save_path = None
+
+    if pipeline_mode == "multiview":
+        checkpoint.mark_stage_start("multiview")
+        try:
+            logger.info("[ETAPA 2/3] Executando pipeline baseado em multiview (Zero123++ + LRM + ISOMER)...")
+            (
+                mesh_glb,
+                mesh_obj,
+                multiview_png,
+            ) = k3d_wrapper.run_multiview_pipeline(
+                input_image,
+                reconstruction_stage2_steps=k3d_wrapper.get_reconstruction_stage2_steps(),
+                save_intermediate_results=True,
+                use_mv_rgb=use_mv_rgb,
+            )
+
+            if multiview_png and Path(multiview_png).exists():
+                mv_file = checkpoint.save_file("multiview", Path(multiview_png).name, Path(multiview_png))
+                checkpoint.mark_stage_success("multiview", str(mv_file))
+            else:
+                checkpoint.mark_stage_success("multiview", None)
+
+            # Não há bundle intermediário nessa rota
+            checkpoint.mark_stage_success(
+                bundle_stage,
+                None,
+                {"skipped": True, "pipeline_mode": pipeline_mode},
+            )
+
+            mesh_target = mesh_glb or mesh_obj
+            if mesh_target and Path(mesh_target).exists():
+                mesh_file = checkpoint.save_file(recon_stage, Path(mesh_target).name, Path(mesh_target))
+                checkpoint.mark_stage_success(recon_stage, str(mesh_file))
+                mesh_save_path = str(mesh_file)
+            else:
+                checkpoint.mark_stage_success(recon_stage, None)
+                mesh_save_path = mesh_target
+        except Exception as exc:
+            error_msg = f"Erro na reconstrução multiview: {exc}"
+            checkpoint.mark_stage_error("multiview", error_msg, traceback.format_exc())
+            checkpoint.mark_stage_error(recon_stage, error_msg, traceback.format_exc())
+            raise
+    else:
+        checkpoint.mark_stage_success("multiview", None, {"skipped": True, "pipeline_mode": pipeline_mode})
+        checkpoint.mark_stage_start(bundle_stage)
+        try:
+            logger.info("[ETAPA 2/3] Gerando bundle 2x4 condicionado por Flux/ControlNet...")
+            bundle_tensor, bundle_path = k3d_wrapper.generate_flux_bundle(
+                input_image=input_image,
+                caption=caption,
+                enable_redux=enable_redux,
+                use_controlnet=use_controlnet,
+            )
+
+            if bundle_path and Path(bundle_path).exists():
+                bundle_file = checkpoint.save_file(bundle_stage, Path(bundle_path).name, Path(bundle_path))
+                checkpoint.mark_stage_success(bundle_stage, str(bundle_file))
+                bundle_save_path = str(bundle_file)
+            else:
+                checkpoint.mark_stage_success(bundle_stage, None)
+                bundle_save_path = bundle_path
+        except Exception as exc:
+            error_msg = f"Erro ao gerar bundle com Flux: {exc}"
+            checkpoint.mark_stage_error(bundle_stage, error_msg, traceback.format_exc())
+            raise
+
+        checkpoint.mark_stage_start(recon_stage)
+        try:
+            logger.info("[ETAPA 3/3] Reconstruindo mesh a partir do bundle Flux...")
+            recon_mesh_path = k3d_wrapper.reconstruct_3d_bundle_image(
+                bundle_tensor,
+                reconstruction_stage2_steps=k3d_wrapper.get_reconstruction_stage2_steps(),
+                save_intermediate_results=True,
+            )
+            if recon_mesh_path and Path(recon_mesh_path).exists():
+                mesh_file = checkpoint.save_file(recon_stage, Path(recon_mesh_path).name, Path(recon_mesh_path))
+                checkpoint.mark_stage_success(recon_stage, str(mesh_file))
+                mesh_save_path = str(mesh_file)
+            else:
+                checkpoint.mark_stage_success(recon_stage, None)
+                mesh_save_path = recon_mesh_path
+        except Exception as exc:
+            error_msg = f"Erro ao reconstruir mesh do bundle Flux: {exc}"
+            checkpoint.mark_stage_error(recon_stage, error_msg, traceback.format_exc())
+            raise
+
+    return bundle_save_path, mesh_save_path
 
 
 def main():
@@ -643,9 +660,18 @@ def main():
     parser.add_argument("--use-controlnet", action="store_true", help="Usar ControlNet")
     parser.add_argument("--enable-redux", action="store_true", help="Habilitar Redux")
     parser.add_argument("--use-mv-rgb", action="store_true", default=True, help="Usar RGB multiview")
+    parser.add_argument(
+        "--pipeline-mode",
+        choices=["multiview", "flux"],
+        default="flux",
+        help="Escolhe entre reconstrução baseada em multiview (Zero123++ + LRM) ou bundle gerado por Flux",
+    )
     
     args = parser.parse_args()
-    logger.info(f"[MAIN] Argumentos: input={args.input}, output={args.output}, fast_mode={args.fast_mode}, use_controlnet={args.use_controlnet}, enable_redux={args.enable_redux}")
+    logger.info(
+        f"[MAIN] Argumentos: input={args.input}, output={args.output}, fast_mode={args.fast_mode}, "
+        f"use_controlnet={args.use_controlnet}, enable_redux={args.enable_redux}, pipeline_mode={args.pipeline_mode}"
+    )
     
     # Configurar paths
     project_root = Path(__file__).parent.parent
@@ -725,6 +751,7 @@ def main():
             enable_redux=args.enable_redux,
             use_mv_rgb=args.use_mv_rgb,
             use_controlnet=args.use_controlnet,
+            pipeline_mode=args.pipeline_mode,
         )
         
         # Atualizar status final
