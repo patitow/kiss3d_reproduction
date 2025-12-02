@@ -336,28 +336,39 @@ class kiss3d_wrapper(object):
         gen_device = mv_device if isinstance(mv_device, str) and mv_device.startswith("cuda") else "cpu"
 
         # Garantir que o pipeline está completamente no device correto
-        # Verificar o device do VAE que é usado para processar a imagem
-        vae_device = next(self.multiview_pipeline.vae.parameters()).device
+        logger.info(f"[MULTIVIEW] Garantindo que pipeline está em {mv_device}")
         
-        # Garantir que o pipeline inteiro está no device correto
-        if str(vae_device) != mv_device:
-            logger.info(f"[MULTIVIEW] Movendo pipeline de {vae_device} para {mv_device}")
-            self.multiview_pipeline.to(mv_device)
-            # Verificar novamente após mover
-            vae_device = next(self.multiview_pipeline.vae.parameters()).device
-            logger.info(f"[MULTIVIEW] Pipeline movido para {vae_device}")
+        # Mover o pipeline inteiro para o device correto
+        self.multiview_pipeline.to(mv_device)
         
-        # Garantir que todos os componentes do pipeline estão no device correto
-        # O VAE precisa estar completamente no device correto
+        # Garantir que TODOS os componentes estão no device correto
+        # Verificar e mover cada componente individualmente
         if hasattr(self.multiview_pipeline, 'vae'):
-            self.multiview_pipeline.vae.to(mv_device)
-        if hasattr(self.multiview_pipeline, 'unet'):
-            self.multiview_pipeline.unet.to(mv_device)
-        if hasattr(self.multiview_pipeline, 'vision_encoder'):
-            self.multiview_pipeline.vision_encoder.to(mv_device)
+            vae_device = next(self.multiview_pipeline.vae.parameters()).device
+            if str(vae_device) != mv_device:
+                logger.info(f"[MULTIVIEW] Movendo VAE de {vae_device} para {mv_device}")
+                self.multiview_pipeline.vae.to(mv_device)
+                # Verificar novamente
+                vae_device = next(self.multiview_pipeline.vae.parameters()).device
+                logger.info(f"[MULTIVIEW] VAE agora em {vae_device}")
         
-        # Generator deve estar no mesmo device do pipeline
+        if hasattr(self.multiview_pipeline, 'unet'):
+            unet_device = next(self.multiview_pipeline.unet.parameters()).device
+            if str(unet_device) != mv_device:
+                logger.info(f"[MULTIVIEW] Movendo UNet de {unet_device} para {mv_device}")
+                self.multiview_pipeline.unet.to(mv_device)
+        
+        if hasattr(self.multiview_pipeline, 'vision_encoder'):
+            vision_device = next(self.multiview_pipeline.vision_encoder.parameters()).device
+            if str(vision_device) != mv_device:
+                logger.info(f"[MULTIVIEW] Movendo vision_encoder de {vision_device} para {mv_device}")
+                self.multiview_pipeline.vision_encoder.to(mv_device)
+        
+        # Verificar device final do VAE para o generator
+        vae_device = next(self.multiview_pipeline.vae.parameters()).device
         generator = torch.Generator(device=str(vae_device)).manual_seed(seed)
+        
+        logger.info(f"[MULTIVIEW] Pipeline pronto, VAE em {vae_device}")
         
         with self.context():
             mv_image = self.multiview_pipeline(
