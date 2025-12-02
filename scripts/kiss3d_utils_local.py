@@ -278,8 +278,14 @@ def lrm_reconstruct(
         frames = None
         albedos = None
 
-    vertices = torch.from_numpy(vertices).to(device)
-    faces = torch.from_numpy(faces).to(device)
+    if isinstance(vertices, torch.Tensor):
+        vertices = vertices.to(device)
+    else:
+        vertices = torch.from_numpy(vertices).to(device)
+    if isinstance(faces, torch.Tensor):
+        faces = faces.to(device)
+    else:
+        faces = torch.from_numpy(faces).to(device)
     vertices = vertices @ rotate_x(np.pi / 2, device=device)[:3, :3]
     vertices = vertices @ rotate_y(np.pi / 2, device=device)[:3, :3]
 

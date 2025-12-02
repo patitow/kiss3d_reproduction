@@ -23,7 +23,15 @@ warnings.filterwarnings('ignore', message='.*_get_vc_env is private.*')
 
 import torchvision
 from torchvision.transforms import functional as TF
-from transformers import AutoProcessor, AutoModelForCausalLM, AutoTokenizer
+from transformers import (
+    AutoProcessor,
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    CLIPTextModel,
+    CLIPTokenizer,
+    T5EncoderModel,
+    T5TokenizerFast,
+)
 from models.llm.llm import load_llm_model, get_llm_response
 
 from diffusers import FluxPipeline, DiffusionPipeline, EulerAncestralDiscreteScheduler, FluxTransformer2DModel
@@ -177,6 +185,11 @@ class kiss3d_wrapper(object):
 
         self.renew_uuid()
 
+        self._clip_text_encoder_cpu = None
+        self._clip_tokenizer_cpu = None
+        self._t5_text_encoder_cpu = None
+        self._t5_tokenizer_cpu = None
+
     def get_reconstruction_stage2_steps(self):
         return self._recon_stage2_fast if self.fast_mode else self._recon_stage2
 
@@ -270,6 +283,70 @@ class kiss3d_wrapper(object):
             raise TypeError(f"Tipo inesperado para mesh: {type(data)}")
 
         return _to_tensor(vertices), _to_tensor(faces)
+
+    def _ensure_flux_text_backbone_cpu(self):
+        if self._clip_text_encoder_cpu is not None:
+            return
+
+        flux_cfg = self.config.get("flux", {})
+        repo_id = flux_cfg.get("fallback_base_model") or "black-forest-labs/FLUX.1-dev"
+        logger.info("[FLUX] Carregando text encoders CPU auxiliares de %s", repo_id)
+
+        self._clip_text_encoder_cpu = CLIPTextModel.from_pretrained(
+            repo_id,
+            subfolder="text_encoder",
+            torch_dtype=torch.float32,
+        ).eval()
+        self._clip_tokenizer_cpu = CLIPTokenizer.from_pretrained(
+            repo_id,
+            subfolder="tokenizer",
+        )
+        self._t5_text_encoder_cpu = T5EncoderModel.from_pretrained(
+            repo_id,
+            subfolder="text_encoder_2",
+            torch_dtype=torch.float32,
+        ).eval()
+        self._t5_tokenizer_cpu = T5TokenizerFast.from_pretrained(
+            repo_id,
+            subfolder="tokenizer_2",
+        )
+
+    def _encode_prompt_cpu(self, prompt: str, prompt_2: str, num_images_per_prompt: int):
+        self._ensure_flux_text_backbone_cpu()
+
+        clip_tokenizer = self._clip_tokenizer_cpu
+        clip_encoder = self._clip_text_encoder_cpu
+        t5_tokenizer = self._t5_tokenizer_cpu
+        t5_encoder = self._t5_text_encoder_cpu
+
+        clip_inputs = clip_tokenizer(
+            prompt,
+            padding="max_length",
+            max_length=clip_tokenizer.model_max_length,
+            truncation=True,
+            return_tensors="pt",
+        )
+        with torch.no_grad():
+            clip_out = clip_encoder(clip_inputs.input_ids, output_hidden_states=False)
+        pooled_prompt_embeds = clip_out.pooler_output
+        pooled_prompt_embeds = pooled_prompt_embeds.repeat(1, num_images_per_prompt)
+        pooled_prompt_embeds = pooled_prompt_embeds.view(-1, pooled_prompt_embeds.shape[-1])
+
+        t5_prompt = prompt_2 or prompt
+        t5_inputs = t5_tokenizer(
+            t5_prompt,
+            padding="max_length",
+            max_length=512,
+            truncation=True,
+            return_tensors="pt",
+        )
+        with torch.no_grad():
+            t5_out = t5_encoder(t5_inputs.input_ids, output_hidden_states=False)[0]
+        seq_len = t5_out.shape[1]
+        prompt_embeds = t5_out.repeat(1, num_images_per_prompt, 1)
+        prompt_embeds = prompt_embeds.view(-1, seq_len, t5_out.shape[-1])
+
+        return prompt_embeds, pooled_prompt_embeds
 
     def _build_flux_seed_bundle(self, input_image: Image.Image) -> torch.Tensor:
         flux_device = torch.device(self.config["flux"].get("device", "cpu"))
@@ -704,7 +781,7 @@ class kiss3d_wrapper(object):
         redux_hparam = None
         if enable_redux and self.flux_redux_pipeline is not None:
             redux_hparam = {
-                "image": self.to_512_tensor(input_image).unsqueeze(0).clip(0.0, 1.0).to(flux_device),
+                "image": self.to_512_tensor(input_image).unsqueeze(0).clip(0.0, 1.0),
                 "prompt_embeds_scale": 1.0,
                 "pooled_prompt_embeds_scale": 1.0,
                 "strength": 0.5,
@@ -863,16 +940,58 @@ class kiss3d_wrapper(object):
         if redux_hparam is not None:
             assert self.flux_redux_pipeline is not None
             assert "image" in redux_hparam.keys()
+
+            prompt_primary = hparam_dict.get("prompt")
+            prompt_secondary = hparam_dict.get("prompt_2")
             redux_hparam_ = {
-                "prompt": hparam_dict.pop("prompt"),
-                "prompt_2": hparam_dict.pop("prompt_2"),
+                "prompt": prompt_primary,
+                "prompt_2": prompt_secondary,
             }
             redux_hparam_.update(redux_hparam)
 
-            with self.context():
-                self.flux_redux_pipeline(**redux_hparam_)
+            try:
+                with self.context():
+                    self.flux_redux_pipeline(**redux_hparam_)
+            except RuntimeError as exc:
+                logger.error(
+                    "[FLUX] Redux pipeline falhou (%s). Prosseguindo sem Redux.",
+                    exc,
+                )
+                redux_hparam = None
+            else:
+                hparam_dict["prompt"] = prompt_primary
+                hparam_dict["prompt_2"] = prompt_secondary
 
         control_mode_idx = [control_mode_dict[mode] for mode in control_mode]
+
+        try:
+            prompt_embeds_cpu, pooled_prompt_embeds_cpu = self._encode_prompt_cpu(
+                prompt=hparam_dict["prompt"],
+                prompt_2=hparam_dict["prompt_2"],
+                num_images_per_prompt=hparam_dict["num_images_per_prompt"],
+            )
+            prompt_embeds = prompt_embeds_cpu.to(
+                device=flux_device,
+                dtype=self.flux_pipeline.text_encoder_2.dtype,
+            )
+            pooled_prompt_embeds = pooled_prompt_embeds_cpu.to(
+                device=flux_device,
+                dtype=self.flux_pipeline.text_encoder.dtype,
+            )
+            hparam_dict["prompt_embeds"] = prompt_embeds
+            hparam_dict["pooled_prompt_embeds"] = pooled_prompt_embeds
+            hparam_dict.pop("prompt", None)
+            hparam_dict.pop("prompt_2", None)
+            logger.info(
+                "[FLUX] Prompt embeddings pré-calculadas via CPU (shape=%s, pooled=%s)",
+                tuple(prompt_embeds.shape),
+                tuple(pooled_prompt_embeds.shape),
+            )
+        except Exception as exc:
+            logger.warning(
+                "[FLUX] Falha ao pré-calcular embeddings do prompt (%s). Voltando ao caminho padrão.",
+                exc,
+            )
 
         extra_kwargs = {
             "control_image": control_image,
