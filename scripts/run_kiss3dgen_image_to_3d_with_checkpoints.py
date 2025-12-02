@@ -512,6 +512,161 @@ class PipelineCheckpoint:
         return [stage for stage, info in self.status["stages"].items() if info["status"] == "completed"]
 
 
+def run_reconstruction_from_checkpoints(
+    k3d_wrapper,
+    checkpoint: PipelineCheckpoint,
+    enable_redux: bool = True,
+    use_controlnet: bool = True,
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Executa apenas a reconstrução usando resultados já gerados dos checkpoints
+    Evita reprocessar multiview, bundle e caption
+    """
+    import torch
+    import torchvision.transforms.functional as TF
+    from PIL import Image
+    
+    # Carregar bundle 3D já gerado
+    bundle_file = checkpoint.checkpoint_dir / "bundle_3d" / "bundle_3d.png"
+    if not bundle_file.exists():
+        raise FileNotFoundError(f"Bundle 3D não encontrado em checkpoint: {bundle_file}")
+    
+    logger.info(f"[RECONSTRUCTION] Carregando bundle 3D de checkpoint: {bundle_file}")
+    ref_3d_bundle_image = Image.open(bundle_file)
+    ref_3d_bundle_image = TF.to_tensor(ref_3d_bundle_image)  # (3, H, W)
+    
+    # Carregar caption já gerado
+    caption_file = checkpoint.checkpoint_dir / "caption" / "caption.txt"
+    if not caption_file.exists():
+        raise FileNotFoundError(f"Caption não encontrado em checkpoint: {caption_file}")
+    
+    caption = caption_file.read_text(encoding='utf-8').strip()
+    logger.info(f"[RECONSTRUCTION] Caption carregado: {caption[:100]}...")
+    
+    # Preparar Redux se necessário
+    if enable_redux:
+        # Carregar imagem original para Redux
+        input_image_path = checkpoint.checkpoint_dir.parent.parent / ".." / ".." / "raw" / "gazebo_dataset" / "images" / f"{checkpoint.job_name}.jpg"
+        # Tentar encontrar a imagem original
+        if not input_image_path.exists():
+            # Tentar outros formatos
+            for ext in [".jpg", ".png", ".jpeg"]:
+                test_path = input_image_path.with_suffix(ext)
+                if test_path.exists():
+                    input_image_path = test_path
+                    break
+        
+        if input_image_path.exists():
+            input_image = Image.open(input_image_path)
+            redux_hparam = {
+                "image": k3d_wrapper.to_512_tensor(input_image).unsqueeze(0).clip(0.0, 1.0),
+                "prompt_embeds_scale": 1.0,
+                "pooled_prompt_embeds_scale": 1.0,
+                "strength": 0.5,
+            }
+        else:
+            logger.warning("[RECONSTRUCTION] Imagem original não encontrada, Redux será desabilitado")
+            redux_hparam = None
+    else:
+        redux_hparam = None
+    
+    # Preparar Flux input
+    flux_cfg = k3d_wrapper.config.get("flux", {})
+    flux_ready_image = TF.resize(
+        ref_3d_bundle_image,
+        [k3d_wrapper.flux_height, k3d_wrapper.flux_width],
+        antialias=True,
+    ).unsqueeze(0).clamp(0.0, 1.0)
+    
+    logger.info(f"[RECONSTRUCTION] Flux input ajustado para {k3d_wrapper.flux_height}x{k3d_wrapper.flux_width}")
+    
+    # Gerar bundle final com Flux
+    if use_controlnet:
+        control_mode = flux_cfg.get("controlnet_modes", ["tile"])
+        control_kernel = flux_cfg.get("controlnet_kernel_size", 51)
+        control_sigma = flux_cfg.get("controlnet_sigma", 2.0)
+        control_downscale = flux_cfg.get("controlnet_down_scale", 1)
+        control_guidance_start = flux_cfg.get("controlnet_guidance_start", 0.0)
+        control_guidance_end = flux_cfg.get("controlnet_guidance_end", 0.65)
+        controlnet_conditioning_scale = flux_cfg.get("controlnet_conditioning_scale", 0.6)
+        
+        control_mode = list(control_mode) if isinstance(control_mode, (list, tuple)) else [control_mode]
+        if k3d_wrapper.fast_mode and len(control_mode) > 1:
+            logger.info(f"[RECONSTRUCTION] Fast mode: reduzindo controlnet_modes para {control_mode[:1]}")
+            control_mode = control_mode[:1]
+        
+        def _expand_sequence(value, default, target_len):
+            if isinstance(value, (list, tuple)):
+                seq = list(value)
+            else:
+                seq = [value]
+            if not seq:
+                seq = [default]
+            while len(seq) < target_len:
+                seq.append(seq[-1])
+            return seq
+        
+        control_guidance_start = _expand_sequence(control_guidance_start, 0.0, len(control_mode))
+        control_guidance_end = _expand_sequence(control_guidance_end, 0.65, len(control_mode))
+        controlnet_conditioning_scale = _expand_sequence(controlnet_conditioning_scale, 0.6, len(control_mode))
+        
+        control_image = [
+            k3d_wrapper.preprocess_controlnet_cond_image(
+                ref_3d_bundle_image,
+                mode_,
+                down_scale=control_downscale,
+                kernel_size=control_kernel,
+                sigma=control_sigma,
+            )
+            for mode_ in control_mode
+        ]
+        control_dtype = getattr(k3d_wrapper.flux_pipeline.controlnet, "dtype", flux_ready_image.dtype)
+        control_image = [
+            TF.resize(img, [k3d_wrapper.flux_height, k3d_wrapper.flux_width], antialias=True).to(
+                dtype=control_dtype
+            )
+            for img in control_image
+        ]
+        
+        gen_3d_bundle_image, gen_save_path = k3d_wrapper.generate_3d_bundle_image_controlnet(
+            prompt=caption,
+            image=flux_ready_image,
+            strength=0.95,
+            control_image=control_image,
+            control_mode=control_mode,
+            control_guidance_start=control_guidance_start,
+            control_guidance_end=control_guidance_end,
+            controlnet_conditioning_scale=controlnet_conditioning_scale,
+            lora_scale=1.0,
+            redux_hparam=redux_hparam,
+        )
+    else:
+        gen_3d_bundle_image, gen_save_path = k3d_wrapper.generate_3d_bundle_image_text(
+            prompt=caption,
+            image=flux_ready_image,
+            strength=0.95,
+            lora_scale=1.0,
+            redux_hparam=redux_hparam,
+        )
+    
+    k3d_wrapper.offload_flux_pipelines()
+    
+    # Preparar para reconstrução
+    if gen_3d_bundle_image.dim() == 4:
+        if gen_3d_bundle_image.shape[0] == 1:
+            gen_3d_bundle_image = gen_3d_bundle_image.squeeze(0)
+    
+    # Reconstruir mesh
+    recon_mesh_path = k3d_wrapper.reconstruct_3d_bundle_image(
+        gen_3d_bundle_image,
+        save_intermediate_results=False,
+        isomer_radius=4.15,
+        reconstruction_stage2_steps=k3d_wrapper.get_reconstruction_stage2_steps(),
+    )
+    
+    return gen_save_path, recon_mesh_path
+
+
 def run_image_to_3d_with_checkpoints(
     k3d_wrapper,
     input_image_path: str,
@@ -522,6 +677,7 @@ def run_image_to_3d_with_checkpoints(
 ) -> Tuple[Optional[str], Optional[str]]:
     """
     Executa pipeline com sistema de checkpoints
+    Verifica checkpoints existentes e pula etapas já completadas
     Retorna: (bundle_path, mesh_path)
     """
     from PIL import Image
@@ -530,89 +686,90 @@ def run_image_to_3d_with_checkpoints(
     if not input_image_path.exists():
         raise FileNotFoundError(f"Imagem não encontrada: {input_image_path}")
     
-    # Seguir ordem do pipeline original: primeiro multiview, depois caption
     from scripts.kiss3d_utils_local import preprocess_input_image
     
     input_image = preprocess_input_image(Image.open(input_image_path))
     input_image.save(os.path.join(TMP_DIR, f"{k3d_wrapper.uuid}_input_image.png"))
     
+    # Verificar se etapas já foram completadas
+    completed_stages = checkpoint.get_completed_stages()
+    logger.info(f"[CHECKPOINT] Etapas já completadas: {completed_stages}")
+    
     # Etapa 1: Multiview + Bundle 3D (gerados juntos)
-    checkpoint.mark_stage_start("multiview")
-    checkpoint.mark_stage_start("bundle_3d")
-    try:
-        logger.info("[ETAPA 1/4] Gerando multiview e bundle 3D...")
-        ref_3d_bundle_image, reference_save_path = k3d_wrapper.generate_reference_3D_bundle_image_zero123(
-            input_image,
-            use_mv_rgb=use_mv_rgb,
-            save_intermediate_results=True
-        )
-        
-        # Salvar multiview (gerado internamente)
-        mv_files = list(Path(TMP_DIR).glob(f"{k3d_wrapper.uuid}_mv_image.png"))
-        if mv_files:
-            mv_file = checkpoint.save_file("multiview", "multiview.png", mv_files[0])
-            logger.info(f"[OK] Multiview gerado: {mv_file}")
-            checkpoint.mark_stage_success("multiview", str(mv_file))
-        else:
-            logger.warning("[AVISO] Multiview não encontrado no TMP_DIR")
-            checkpoint.mark_stage_success("multiview", None)
-        
-        # Salvar bundle 3D
-        bundle_files = list(Path(TMP_DIR).glob(f"{k3d_wrapper.uuid}_ref_3d_bundle_image.png"))
-        if bundle_files:
-            bundle_file = checkpoint.save_file("bundle_3d", "bundle_3d.png", bundle_files[0])
-            logger.info(f"[OK] Bundle 3D gerado: {bundle_file}")
-            checkpoint.mark_stage_success("bundle_3d", str(bundle_file))
-        else:
-            logger.warning("[AVISO] Bundle 3D não encontrado no TMP_DIR")
-            checkpoint.mark_stage_success("bundle_3d", None)
-        
-        # Descarregar multiview pipeline para liberar VRAM
-        k3d_wrapper.offload_multiview_pipeline()
-    except Exception as e:
-        error_msg = f"Erro ao gerar multiview/bundle 3D: {e}"
-        checkpoint.mark_stage_error("multiview", error_msg, traceback.format_exc())
-        checkpoint.mark_stage_error("bundle_3d", error_msg, traceback.format_exc())
-        raise
+    if "multiview" not in completed_stages or "bundle_3d" not in completed_stages:
+        checkpoint.mark_stage_start("multiview")
+        checkpoint.mark_stage_start("bundle_3d")
+        try:
+            logger.info("[ETAPA 1/4] Gerando multiview e bundle 3D...")
+            ref_3d_bundle_image, reference_save_path = k3d_wrapper.generate_reference_3D_bundle_image_zero123(
+                input_image,
+                use_mv_rgb=use_mv_rgb,
+                save_intermediate_results=True
+            )
+            
+            # Salvar multiview (gerado internamente)
+            mv_files = list(Path(TMP_DIR).glob(f"{k3d_wrapper.uuid}_mv_image.png"))
+            if mv_files:
+                mv_file = checkpoint.save_file("multiview", "multiview.png", mv_files[0])
+                logger.info(f"[OK] Multiview gerado: {mv_file}")
+                checkpoint.mark_stage_success("multiview", str(mv_file))
+            else:
+                logger.warning("[AVISO] Multiview não encontrado no TMP_DIR")
+                checkpoint.mark_stage_success("multiview", None)
+            
+            # Salvar bundle 3D
+            bundle_files = list(Path(TMP_DIR).glob(f"{k3d_wrapper.uuid}_ref_3d_bundle_image.png"))
+            if bundle_files:
+                bundle_file = checkpoint.save_file("bundle_3d", "bundle_3d.png", bundle_files[0])
+                logger.info(f"[OK] Bundle 3D gerado: {bundle_file}")
+                checkpoint.mark_stage_success("bundle_3d", str(bundle_file))
+            else:
+                logger.warning("[AVISO] Bundle 3D não encontrado no TMP_DIR")
+                checkpoint.mark_stage_success("bundle_3d", None)
+            
+            # Descarregar multiview pipeline para liberar VRAM
+            k3d_wrapper.offload_multiview_pipeline()
+        except Exception as e:
+            error_msg = f"Erro ao gerar multiview/bundle 3D: {e}"
+            checkpoint.mark_stage_error("multiview", error_msg, traceback.format_exc())
+            checkpoint.mark_stage_error("bundle_3d", error_msg, traceback.format_exc())
+            raise
+    else:
+        logger.info("[CHECKPOINT] Multiview e Bundle 3D já completados, pulando...")
     
     # Etapa 2: Caption
-    checkpoint.mark_stage_start("caption")
-    try:
-        logger.info("[ETAPA 2/4] Gerando caption...")
-        caption = k3d_wrapper.get_image_caption(input_image)
-        logger.info(f"[OK] Caption gerado: {caption[:100]}...")
-        
-        # Salvar caption
-        caption_file = checkpoint.checkpoint_dir / "caption" / "caption.txt"
-        caption_file.parent.mkdir(exist_ok=True)
-        caption_file.write_text(caption, encoding='utf-8')
-        checkpoint.mark_stage_success("caption", str(caption_file), {"caption_preview": caption[:200]})
-        
-        # Liberar modelos de texto
-        k3d_wrapper.release_text_models()
-    except Exception as e:
-        error_msg = f"Erro ao gerar caption: {e}"
-        checkpoint.mark_stage_error("caption", error_msg, traceback.format_exc())
-        raise
+    if "caption" not in completed_stages:
+        checkpoint.mark_stage_start("caption")
+        try:
+            logger.info("[ETAPA 2/4] Gerando caption...")
+            caption = k3d_wrapper.get_image_caption(input_image)
+            logger.info(f"[OK] Caption gerado: {caption[:100]}...")
+            
+            # Salvar caption
+            caption_file = checkpoint.checkpoint_dir / "caption" / "caption.txt"
+            caption_file.parent.mkdir(exist_ok=True)
+            caption_file.write_text(caption, encoding='utf-8')
+            checkpoint.mark_stage_success("caption", str(caption_file), {"caption_preview": caption[:200]})
+            
+            # Liberar modelos de texto
+            k3d_wrapper.release_text_models()
+        except Exception as e:
+            error_msg = f"Erro ao gerar caption: {e}"
+            checkpoint.mark_stage_error("caption", error_msg, traceback.format_exc())
+            raise
+    else:
+        logger.info("[CHECKPOINT] Caption já completado, pulando...")
     
-    # Etapa 3: Gerar bundle final com Flux (se necessário)
-    # Esta etapa é opcional e pode ser feita depois
-    
-    # Etapa 4: Reconstrução final (usando run_image_to_3d completo)
-    # Por enquanto, vamos usar a função original que já faz tudo
-    logger.info("[ETAPA 3/4] Pipeline completo em execução...")
-    logger.info("[INFO] Usando função run_image_to_3d original para reconstrução completa")
-    
-    # Importar função original
-    from scripts.kiss3d_wrapper_local import run_image_to_3d
-    
+    # Etapa 3: Reconstrução final (usando resultados dos checkpoints)
     checkpoint.mark_stage_start("reconstruction")
     try:
-        gen_save_path, recon_mesh_path = run_image_to_3d(
+        logger.info("[ETAPA 3/4] Executando reconstrução usando checkpoints...")
+        
+        # Usar função que aproveita checkpoints ao invés de reprocessar tudo
+        gen_save_path, recon_mesh_path = run_reconstruction_from_checkpoints(
             k3d_wrapper,
-            str(input_image_path),
+            checkpoint,
             enable_redux=enable_redux,
-            use_mv_rgb=use_mv_rgb,
             use_controlnet=use_controlnet,
         )
         
@@ -668,6 +825,10 @@ def main():
     
     # Nome do job baseado na imagem
     job_name = input_path.stem
+    
+    # Verificar se job_name está definido
+    if 'job_name' not in locals():
+        job_name = input_path.stem
     
     # Criar checkpoint
     checkpoint = PipelineCheckpoint(output_path, job_name)

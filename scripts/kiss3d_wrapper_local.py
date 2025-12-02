@@ -550,6 +550,47 @@ class kiss3d_wrapper(object):
         if redux_hparam is not None:
             assert self.flux_redux_pipeline is not None
             assert "image" in redux_hparam.keys()
+            
+            # Garantir que o flux_redux_pipeline está no device correto
+            flux_device = self.config["flux"].get("device", "cuda:0")
+            try:
+                # Verificar se o image_encoder está no device correto
+                if hasattr(self.flux_redux_pipeline, 'image_encoder') and self.flux_redux_pipeline.image_encoder is not None:
+                    try:
+                        encoder_device = next(self.flux_redux_pipeline.image_encoder.parameters()).device
+                        if str(encoder_device) == "meta":
+                            # Se está em meta, usar to_empty() primeiro
+                            logger.info(f"[REDUX] image_encoder está em meta, usando to_empty() primeiro")
+                            try:
+                                # to_empty() cria estrutura vazia no device, depois carrega pesos
+                                self.flux_redux_pipeline.image_encoder.to_empty(device=flux_device)
+                                # Se ainda estiver em meta após to_empty, tentar mover novamente
+                                encoder_device_check = next(self.flux_redux_pipeline.image_encoder.parameters()).device
+                                if str(encoder_device_check) == "meta":
+                                    # Se ainda está em meta, pode ser que o modelo não foi inicializado corretamente
+                                    logger.warning(f"[REDUX] image_encoder ainda em meta após to_empty(), tentando inicialização manual")
+                                    # Tentar mover pipeline inteiro para garantir inicialização
+                                    self.flux_redux_pipeline.to(flux_device)
+                                else:
+                                    self.flux_redux_pipeline.image_encoder.to(flux_device)
+                            except AttributeError:
+                                # Se to_empty não existe (PyTorch < 2.0), tentar inicializar de outra forma
+                                logger.warning(f"[REDUX] to_empty() não disponível, movendo pipeline inteiro")
+                                self.flux_redux_pipeline.to(flux_device)
+                        elif str(encoder_device) != str(flux_device):
+                            logger.info(f"[REDUX] Movendo image_encoder de {encoder_device} para {flux_device}")
+                            self.flux_redux_pipeline.image_encoder.to(flux_device)
+                    except (StopIteration, RuntimeError) as e:
+                        # Se não conseguiu acessar parâmetros, mover pipeline inteiro
+                        logger.warning(f"[REDUX] Erro ao verificar device: {e}, movendo pipeline inteiro")
+                        self.flux_redux_pipeline.to(flux_device)
+            except Exception as e:
+                logger.warning(f"[REDUX] Erro ao verificar/mover image_encoder: {e}, movendo pipeline inteiro")
+                try:
+                    self.flux_redux_pipeline.to(flux_device)
+                except Exception as e2:
+                    logger.error(f"[REDUX] Erro crítico ao mover pipeline: {e2}")
+            
             redux_hparam_ = {
                 "prompt": hparam_dict.pop("prompt"),
                 "prompt_2": hparam_dict.pop("prompt_2"),
@@ -627,6 +668,47 @@ class kiss3d_wrapper(object):
         if redux_hparam is not None:
             assert self.flux_redux_pipeline is not None
             assert "image" in redux_hparam.keys()
+            
+            # Garantir que o flux_redux_pipeline está no device correto
+            flux_device = self.config["flux"].get("device", "cuda:0")
+            try:
+                # Verificar se o image_encoder está no device correto
+                if hasattr(self.flux_redux_pipeline, 'image_encoder') and self.flux_redux_pipeline.image_encoder is not None:
+                    try:
+                        encoder_device = next(self.flux_redux_pipeline.image_encoder.parameters()).device
+                        if str(encoder_device) == "meta":
+                            # Se está em meta, usar to_empty() primeiro
+                            logger.info(f"[REDUX] image_encoder está em meta, usando to_empty() primeiro")
+                            try:
+                                # to_empty() cria estrutura vazia no device, depois carrega pesos
+                                self.flux_redux_pipeline.image_encoder.to_empty(device=flux_device)
+                                # Se ainda estiver em meta após to_empty, tentar mover novamente
+                                encoder_device_check = next(self.flux_redux_pipeline.image_encoder.parameters()).device
+                                if str(encoder_device_check) == "meta":
+                                    # Se ainda está em meta, pode ser que o modelo não foi inicializado corretamente
+                                    logger.warning(f"[REDUX] image_encoder ainda em meta após to_empty(), tentando inicialização manual")
+                                    # Tentar mover pipeline inteiro para garantir inicialização
+                                    self.flux_redux_pipeline.to(flux_device)
+                                else:
+                                    self.flux_redux_pipeline.image_encoder.to(flux_device)
+                            except AttributeError:
+                                # Se to_empty não existe (PyTorch < 2.0), tentar inicializar de outra forma
+                                logger.warning(f"[REDUX] to_empty() não disponível, movendo pipeline inteiro")
+                                self.flux_redux_pipeline.to(flux_device)
+                        elif str(encoder_device) != str(flux_device):
+                            logger.info(f"[REDUX] Movendo image_encoder de {encoder_device} para {flux_device}")
+                            self.flux_redux_pipeline.image_encoder.to(flux_device)
+                    except (StopIteration, RuntimeError) as e:
+                        # Se não conseguiu acessar parâmetros, mover pipeline inteiro
+                        logger.warning(f"[REDUX] Erro ao verificar device: {e}, movendo pipeline inteiro")
+                        self.flux_redux_pipeline.to(flux_device)
+            except Exception as e:
+                logger.warning(f"[REDUX] Erro ao verificar/mover image_encoder: {e}, movendo pipeline inteiro")
+                try:
+                    self.flux_redux_pipeline.to(flux_device)
+                except Exception as e2:
+                    logger.error(f"[REDUX] Erro crítico ao mover pipeline: {e2}")
+            
             redux_hparam_ = {
                 "prompt": hparam_dict.pop("prompt"),
                 "prompt_2": hparam_dict.pop("prompt_2"),
@@ -1126,6 +1208,21 @@ def init_wrapper_from_config(
         flux_redux_pipe.text_encoder_2 = flux_pipe.text_encoder_2
         flux_redux_pipe.tokenizer = flux_pipe.tokenizer
         flux_redux_pipe.tokenizer_2 = flux_pipe.tokenizer_2
+
+        # Garantir que image_encoder não fique em meta após carregamento
+        if hasattr(flux_redux_pipe, 'image_encoder') and flux_redux_pipe.image_encoder is not None:
+            try:
+                encoder_device = next(flux_redux_pipe.image_encoder.parameters()).device
+                if str(encoder_device) == "meta":
+                    logger.warning("[MODEL] Redux image_encoder em meta após carregamento, inicializando...")
+                    # Tentar inicializar movendo para CPU primeiro, depois para GPU se necessário
+                    try:
+                        flux_redux_pipe.image_encoder.to_empty(device="cpu")
+                        flux_redux_pipe.image_encoder.to("cpu")
+                    except AttributeError:
+                        flux_redux_pipe.image_encoder.to("cpu")
+            except (StopIteration, RuntimeError):
+                pass
 
         _place_pipeline_on_device(flux_redux_pipe, "Flux Redux pipeline")
         log_memory_usage(logger, "Após carregar Flux Redux")
