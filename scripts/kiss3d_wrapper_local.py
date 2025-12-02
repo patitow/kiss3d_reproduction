@@ -335,15 +335,29 @@ class kiss3d_wrapper(object):
         mv_device = self.config["multiview"].get("device", "cpu")
         gen_device = mv_device if isinstance(mv_device, str) and mv_device.startswith("cuda") else "cpu"
 
-        # Garantir que o pipeline está no device correto
-        if hasattr(self.multiview_pipeline, 'device'):
-            pipeline_device = str(self.multiview_pipeline.device) if hasattr(self.multiview_pipeline.device, '__str__') else str(next(self.multiview_pipeline.vae.parameters()).device)
-        else:
-            pipeline_device = str(next(self.multiview_pipeline.vae.parameters()).device)
+        # Garantir que o pipeline está completamente no device correto
+        # Verificar o device do VAE que é usado para processar a imagem
+        vae_device = next(self.multiview_pipeline.vae.parameters()).device
         
-        # Se o pipeline está em CUDA mas a imagem está em CPU, garantir que o pipeline processe corretamente
-        # O diffusers já cuida disso internamente, mas vamos garantir que o generator está no device correto
-        generator = torch.Generator(device=pipeline_device if "cuda" in pipeline_device else gen_device).manual_seed(seed)
+        # Garantir que o pipeline inteiro está no device correto
+        if str(vae_device) != mv_device:
+            logger.info(f"[MULTIVIEW] Movendo pipeline de {vae_device} para {mv_device}")
+            self.multiview_pipeline.to(mv_device)
+            # Verificar novamente após mover
+            vae_device = next(self.multiview_pipeline.vae.parameters()).device
+            logger.info(f"[MULTIVIEW] Pipeline movido para {vae_device}")
+        
+        # Garantir que todos os componentes do pipeline estão no device correto
+        # O VAE precisa estar completamente no device correto
+        if hasattr(self.multiview_pipeline, 'vae'):
+            self.multiview_pipeline.vae.to(mv_device)
+        if hasattr(self.multiview_pipeline, 'unet'):
+            self.multiview_pipeline.unet.to(mv_device)
+        if hasattr(self.multiview_pipeline, 'vision_encoder'):
+            self.multiview_pipeline.vision_encoder.to(mv_device)
+        
+        # Generator deve estar no mesmo device do pipeline
+        generator = torch.Generator(device=str(vae_device)).manual_seed(seed)
         
         with self.context():
             mv_image = self.multiview_pipeline(
