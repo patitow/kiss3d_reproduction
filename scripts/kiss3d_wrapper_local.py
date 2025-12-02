@@ -189,6 +189,9 @@ class kiss3d_wrapper(object):
             return torch.no_grad()
 
     def get_image_caption(self, image):
+        if self.caption_model is None:
+            raise RuntimeError("Caption model is None! Make sure it was loaded correctly.")
+        
         caption_device = self.config["caption"].get("device", "cpu")
         torch_dtype = (
             torch.bfloat16
@@ -200,6 +203,13 @@ class kiss3d_wrapper(object):
             image = preprocess_input_image(Image.open(image))
         elif not isinstance(image, Image.Image):
             raise NotImplementedError("unexpected image type")
+
+        # Garantir que o caption model está no device correto
+        if hasattr(self.caption_model, 'device'):
+            model_device = next(self.caption_model.parameters()).device
+            if str(model_device) != caption_device:
+                logger.info(f"[CAPTION] Movendo caption model de {model_device} para {caption_device}")
+                self.caption_model.to(caption_device)
 
         prompt = "<MORE_DETAILED_CAPTION>"
         inputs = self.caption_processor(text=prompt, images=image, return_tensors="pt").to(
@@ -249,21 +259,27 @@ class kiss3d_wrapper(object):
         if self.llm_model is not None:
             try:
                 logger.info("[MODEL] Descarregando LLM model...")
-                # Convert to float32 before moving to CPU to avoid float16 warnings
-                if hasattr(self.llm_model, 'dtype'):
-                    model_dtype = getattr(self.llm_model, 'dtype', None)
-                    if model_dtype in [torch.float16, torch.bfloat16]:
-                        # Try to convert, but some models don't support it
-                        try:
-                            logger.debug(f"[MODEL] Convertendo LLM model de {model_dtype} para float32")
-                            self.llm_model = self.llm_model.to(torch.float32)
-                        except Exception as e:
-                            logger.warning(f"[MODEL] Erro ao converter LLM model: {e}")
-                self.llm_model.to("cpu")
-                logger.info("[MODEL] LLM model descarregado para CPU")
+                # Se o LLM é 'ollama' (string), não precisa fazer nada
+                if self.llm_model == 'ollama':
+                    logger.info("[MODEL] LLM é Ollama (API), não precisa descarregar")
+                elif hasattr(self.llm_model, 'to'):
+                    # Convert to float32 before moving to CPU to avoid float16 warnings
+                    if hasattr(self.llm_model, 'dtype'):
+                        model_dtype = getattr(self.llm_model, 'dtype', None)
+                        if model_dtype in [torch.float16, torch.bfloat16]:
+                            # Try to convert, but some models don't support it
+                            try:
+                                logger.debug(f"[MODEL] Convertendo LLM model de {model_dtype} para float32")
+                                self.llm_model = self.llm_model.to(torch.float32)
+                            except Exception as e:
+                                logger.warning(f"[MODEL] Erro ao converter LLM model: {e}")
+                    self.llm_model.to("cpu")
+                    logger.info("[MODEL] LLM model descarregado para CPU")
             except Exception as e:
                 logger.error(f"[MODEL] Erro ao descarregar LLM model: {e}")
-        self.llm_model = None
+        # Não definir como None se for Ollama - apenas limpar referências
+        if self.llm_model != 'ollama':
+            self.llm_model = None
         self.llm_tokenizer = None
         _empty_cuda_cache()
 
@@ -287,7 +303,8 @@ class kiss3d_wrapper(object):
                 logger.info("[MODEL] Caption model descarregado para CPU")
             except Exception as e:
                 logger.error(f"[MODEL] Erro ao descarregar caption model: {e}")
-            self.caption_model = None
+            # NÃO definir como None - apenas mover para CPU para poder reutilizar depois
+            # self.caption_model = None
         self.del_llm_model()
         log_memory_usage(logger, "Após descarregar modelos de texto")
 
