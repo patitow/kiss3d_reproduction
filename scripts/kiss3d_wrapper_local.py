@@ -10,6 +10,7 @@ from typing import Union, Any, Dict
 from einops import rearrange
 from PIL import Image
 import time
+import torch.nn.functional as F
 
 # Suprimir warnings comuns e não críticos
 warnings.filterwarnings('ignore', message='.*Some weights of.*were not used.*')
@@ -187,6 +188,78 @@ class kiss3d_wrapper(object):
             pass
         else:
             return torch.no_grad()
+
+    def _assert_no_duplicate_views(
+        self,
+        bundle_image: torch.Tensor,
+        stage_name: str,
+        similarity_threshold: float = 0.995,
+        min_duplicate_pairs: int = 3,
+    ):
+        """
+        Detects nearly identical RGB views (top row of the bundle grid).
+        If many views are almost identical, the downstream reconstruction
+        produces a duplicated mesh, so we abort early for manual inspection.
+        """
+        try:
+            if bundle_image is None:
+                return
+
+            tensor = bundle_image.detach().float().cpu()
+            if tensor.dim() == 4 and tensor.shape[0] == 1:
+                tensor = tensor.squeeze(0)
+            if tensor.dim() != 3:
+                logger.warning(
+                    "[DUPLICATE_CHECK] Ignorando bundle com shape inesperado %s no estágio %s",
+                    tuple(tensor.shape),
+                    stage_name,
+                )
+                return
+
+            channels, height, width = tensor.shape
+            if channels < 3 or height < 2 or width < 4:
+                return
+
+            if height % 2 != 0 or width % 4 != 0:
+                logger.warning(
+                    "[DUPLICATE_CHECK] Bundle não está no layout 2x4 esperado no estágio %s (shape=%s)",
+                    stage_name,
+                    tuple(tensor.shape),
+                )
+                return
+
+            views = rearrange(
+                tensor,
+                "c (rows h) (cols w) -> (rows cols) c h w",
+                rows=2,
+                cols=4,
+            )
+            rgb_views = views[:4].reshape(4, -1)
+            rgb_views = rgb_views - rgb_views.mean(dim=1, keepdim=True)
+            rgb_views = F.normalize(rgb_views, dim=1, eps=1e-6)
+            sim_matrix = torch.matmul(rgb_views, rgb_views.T)
+            tri_indices = torch.triu_indices(sim_matrix.size(0), sim_matrix.size(1), offset=1)
+            pair_similarities = sim_matrix[tri_indices[0], tri_indices[1]]
+
+            duplicate_pairs = int((pair_similarities > similarity_threshold).sum().item())
+            pixel_std = float(rgb_views.std(dim=1).mean().item())
+
+            if duplicate_pairs >= min_duplicate_pairs:
+                message = (
+                    f"[DUPLICATE_DETECTED] {stage_name}: {duplicate_pairs}/6 pares de vistas "
+                    f"com similaridade > {similarity_threshold:.3f} (std médio {pixel_std:.6f}). "
+                    "Abandonando pipeline para evitar malha duplicada."
+                )
+                logger.error(message)
+                raise RuntimeError(message)
+        except RuntimeError:
+            raise
+        except Exception as exc:  # best-effort detector; não bloquear pipeline em erro inesperado
+            logger.warning(
+                "[DUPLICATE_CHECK] Falha ao avaliar duplicação no estágio %s: %s",
+                stage_name,
+                exc,
+            )
 
     def get_image_caption(self, image):
         if self.caption_model is None:
@@ -480,6 +553,8 @@ class kiss3d_wrapper(object):
 
         ref_3D_bundle_image = ref_3D_bundle_image.clip(0.0, 1.0)
 
+        self._assert_no_duplicate_views(ref_3D_bundle_image, stage_name="reference_bundle_image")
+
         if save_intermediate_results:
             save_path = os.path.join(TMP_DIR, f"{self.uuid}_ref_3d_bundle_image.png")
             torchvision.utils.save_image(ref_3D_bundle_image, save_path)
@@ -550,62 +625,14 @@ class kiss3d_wrapper(object):
         if redux_hparam is not None:
             assert self.flux_redux_pipeline is not None
             assert "image" in redux_hparam.keys()
-            
-            # Garantir que o flux_redux_pipeline está no device correto
-            flux_device = self.config["flux"].get("device", "cuda:0")
-            try:
-                # Verificar se o image_encoder está no device correto
-                if hasattr(self.flux_redux_pipeline, 'image_encoder') and self.flux_redux_pipeline.image_encoder is not None:
-                    try:
-                        encoder_device = next(self.flux_redux_pipeline.image_encoder.parameters()).device
-                        if str(encoder_device) == "meta":
-                            # Se está em meta, usar to_empty() primeiro
-                            logger.info(f"[REDUX] image_encoder está em meta, usando to_empty() primeiro")
-                            try:
-                                # to_empty() cria estrutura vazia no device, depois carrega pesos
-                                self.flux_redux_pipeline.image_encoder.to_empty(device=flux_device)
-                                # Se ainda estiver em meta após to_empty, tentar mover novamente
-                                encoder_device_check = next(self.flux_redux_pipeline.image_encoder.parameters()).device
-                                if str(encoder_device_check) == "meta":
-                                    # Se ainda está em meta, pode ser que o modelo não foi inicializado corretamente
-                                    logger.warning(f"[REDUX] image_encoder ainda em meta após to_empty(), tentando inicialização manual")
-                                    # Tentar mover pipeline inteiro para garantir inicialização
-                                    self.flux_redux_pipeline.to(flux_device)
-                                else:
-                                    self.flux_redux_pipeline.image_encoder.to(flux_device)
-                            except AttributeError:
-                                # Se to_empty não existe (PyTorch < 2.0), tentar inicializar de outra forma
-                                logger.warning(f"[REDUX] to_empty() não disponível, movendo pipeline inteiro")
-                                self.flux_redux_pipeline.to(flux_device)
-                        elif str(encoder_device) != str(flux_device):
-                            logger.info(f"[REDUX] Movendo image_encoder de {encoder_device} para {flux_device}")
-                            self.flux_redux_pipeline.image_encoder.to(flux_device)
-                    except (StopIteration, RuntimeError) as e:
-                        # Se não conseguiu acessar parâmetros, mover pipeline inteiro
-                        logger.warning(f"[REDUX] Erro ao verificar device: {e}, movendo pipeline inteiro")
-                        self.flux_redux_pipeline.to(flux_device)
-            except Exception as e:
-                logger.warning(f"[REDUX] Erro ao verificar/mover image_encoder: {e}, movendo pipeline inteiro")
-                try:
-                    self.flux_redux_pipeline.to(flux_device)
-                except Exception as e2:
-                    logger.error(f"[REDUX] Erro crítico ao mover pipeline: {e2}")
-            
-            prompt_primary = hparam_dict.get("prompt")
-            prompt_secondary = hparam_dict.get("prompt_2")
-
             redux_hparam_ = {
-                "prompt": prompt_primary,
-                "prompt_2": prompt_secondary,
+                "prompt": hparam_dict.pop("prompt"),
+                "prompt_2": hparam_dict.pop("prompt_2"),
             }
             redux_hparam_.update(redux_hparam)
 
             with self.context():
                 self.flux_redux_pipeline(**redux_hparam_)
-
-            # Recolocar prompts para uso pela pipeline principal
-            hparam_dict["prompt"] = prompt_primary
-            hparam_dict["prompt_2"] = prompt_secondary
 
         control_mode_idx = [control_mode_dict[mode] for mode in control_mode]
 
@@ -628,6 +655,8 @@ class kiss3d_wrapper(object):
             torchvision.utils.save_image(images, save_path)
         else:
             save_path = None
+
+        self._assert_no_duplicate_views(images, stage_name="flux_controlnet_bundle")
 
         return images, save_path
 
@@ -675,47 +704,6 @@ class kiss3d_wrapper(object):
         if redux_hparam is not None:
             assert self.flux_redux_pipeline is not None
             assert "image" in redux_hparam.keys()
-            
-            # Garantir que o flux_redux_pipeline está no device correto
-            flux_device = self.config["flux"].get("device", "cuda:0")
-            try:
-                # Verificar se o image_encoder está no device correto
-                if hasattr(self.flux_redux_pipeline, 'image_encoder') and self.flux_redux_pipeline.image_encoder is not None:
-                    try:
-                        encoder_device = next(self.flux_redux_pipeline.image_encoder.parameters()).device
-                        if str(encoder_device) == "meta":
-                            # Se está em meta, usar to_empty() primeiro
-                            logger.info(f"[REDUX] image_encoder está em meta, usando to_empty() primeiro")
-                            try:
-                                # to_empty() cria estrutura vazia no device, depois carrega pesos
-                                self.flux_redux_pipeline.image_encoder.to_empty(device=flux_device)
-                                # Se ainda estiver em meta após to_empty, tentar mover novamente
-                                encoder_device_check = next(self.flux_redux_pipeline.image_encoder.parameters()).device
-                                if str(encoder_device_check) == "meta":
-                                    # Se ainda está em meta, pode ser que o modelo não foi inicializado corretamente
-                                    logger.warning(f"[REDUX] image_encoder ainda em meta após to_empty(), tentando inicialização manual")
-                                    # Tentar mover pipeline inteiro para garantir inicialização
-                                    self.flux_redux_pipeline.to(flux_device)
-                                else:
-                                    self.flux_redux_pipeline.image_encoder.to(flux_device)
-                            except AttributeError:
-                                # Se to_empty não existe (PyTorch < 2.0), tentar inicializar de outra forma
-                                logger.warning(f"[REDUX] to_empty() não disponível, movendo pipeline inteiro")
-                                self.flux_redux_pipeline.to(flux_device)
-                        elif str(encoder_device) != str(flux_device):
-                            logger.info(f"[REDUX] Movendo image_encoder de {encoder_device} para {flux_device}")
-                            self.flux_redux_pipeline.image_encoder.to(flux_device)
-                    except (StopIteration, RuntimeError) as e:
-                        # Se não conseguiu acessar parâmetros, mover pipeline inteiro
-                        logger.warning(f"[REDUX] Erro ao verificar device: {e}, movendo pipeline inteiro")
-                        self.flux_redux_pipeline.to(flux_device)
-            except Exception as e:
-                logger.warning(f"[REDUX] Erro ao verificar/mover image_encoder: {e}, movendo pipeline inteiro")
-                try:
-                    self.flux_redux_pipeline.to(flux_device)
-                except Exception as e2:
-                    logger.error(f"[REDUX] Erro crítico ao mover pipeline: {e2}")
-            
             redux_hparam_ = {
                 "prompt": hparam_dict.pop("prompt"),
                 "prompt_2": hparam_dict.pop("prompt_2"),
@@ -736,6 +724,8 @@ class kiss3d_wrapper(object):
             torchvision.utils.save_image(images, save_path)
         else:
             save_path = None
+
+        self._assert_no_duplicate_views(images, stage_name="flux_text_bundle")
 
         return images, save_path
 
@@ -1215,21 +1205,6 @@ def init_wrapper_from_config(
         flux_redux_pipe.text_encoder_2 = flux_pipe.text_encoder_2
         flux_redux_pipe.tokenizer = flux_pipe.tokenizer
         flux_redux_pipe.tokenizer_2 = flux_pipe.tokenizer_2
-
-        # Garantir que image_encoder não fique em meta após carregamento
-        if hasattr(flux_redux_pipe, 'image_encoder') and flux_redux_pipe.image_encoder is not None:
-            try:
-                encoder_device = next(flux_redux_pipe.image_encoder.parameters()).device
-                if str(encoder_device) == "meta":
-                    logger.warning("[MODEL] Redux image_encoder em meta após carregamento, inicializando...")
-                    # Tentar inicializar movendo para CPU primeiro, depois para GPU se necessário
-                    try:
-                        flux_redux_pipe.image_encoder.to_empty(device="cpu")
-                        flux_redux_pipe.image_encoder.to("cpu")
-                    except AttributeError:
-                        flux_redux_pipe.image_encoder.to("cpu")
-            except (StopIteration, RuntimeError):
-                pass
 
         _place_pipeline_on_device(flux_redux_pipe, "Flux Redux pipeline")
         log_memory_usage(logger, "Após carregar Flux Redux")

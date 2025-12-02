@@ -278,17 +278,8 @@ def lrm_reconstruct(
         frames = None
         albedos = None
 
-    # Converter para tensor se necessário (extract_mesh retorna numpy quando export_texmap=False, tensor quando True)
-    if isinstance(vertices, np.ndarray):
-        vertices = torch.from_numpy(vertices).to(device)
-    else:
-        vertices = vertices.to(device)
-    
-    if isinstance(faces, np.ndarray):
-        faces = torch.from_numpy(faces).to(device)
-    else:
-        faces = faces.to(device)
-    
+    vertices = torch.from_numpy(vertices).to(device)
+    faces = torch.from_numpy(faces).to(device)
     vertices = vertices @ rotate_x(np.pi / 2, device=device)[:3, :3]
     vertices = vertices @ rotate_y(np.pi / 2, device=device)[:3, :3]
 
@@ -327,29 +318,23 @@ def isomer_reconstruct(
     end = time.time()
     device = rgb_multi_view.device
     
-    # Verificar se pytorch3d tem suporte GPU
+    # Detect if pytorch3d has GPU support, fallback to CPU if not
     try:
         from pytorch3d.structures import Meshes
-        test_mesh = Meshes(verts=[torch.zeros(1, 3)], faces=[torch.zeros(1, 3, dtype=torch.long)])
-        if device.type == "cuda":
-            try:
-                test_mesh = test_mesh.to(device)
-                _ = test_mesh.faces_normals_packed()  # Testar operação que requer GPU
-                py3d_has_gpu = True
-            except RuntimeError as e:
-                if "Not compiled with GPU support" in str(e):
-                    py3d_has_gpu = False
-                    logger.warning("[ISOMER] pytorch3d não tem suporte GPU. Usando CPU para operações pytorch3d.")
-                else:
-                    raise
+        test_mesh = Meshes(verts=[torch.zeros(3, 3)], faces=[torch.zeros(1, 3).long()])
+        if device.type == 'cuda':
+            test_mesh = test_mesh.to(device)
+            _ = test_mesh.faces_normals_packed()  # This will fail if no GPU support
+        py3d_device = device
+    except RuntimeError as e:
+        if "Not compiled with GPU support" in str(e) or "GPU" in str(e):
+            logger.warning("pytorch3d não tem suporte GPU, forçando CPU para operações ISOMER")
+            py3d_device = torch.device('cpu')
+            # Move tensors to CPU for pytorch3d operations
+            vertices = vertices.cpu() if isinstance(vertices, torch.Tensor) else vertices
+            faces = faces.cpu() if isinstance(faces, torch.Tensor) else faces
         else:
-            py3d_has_gpu = False
-    except Exception as e:
-        logger.warning(f"[ISOMER] Erro ao verificar suporte GPU do pytorch3d: {e}. Usando CPU.")
-        py3d_has_gpu = False
-    
-    # Usar CPU para pytorch3d se não tiver suporte GPU
-    py3d_device = "cpu" if not py3d_has_gpu and device.type == "cuda" else device
+            raise
     
     to_tensor_ = lambda x: torch.Tensor(x).float().to(device)
 
@@ -398,46 +383,19 @@ def isomer_reconstruct(
         m, p, apply_sRGB_to_LinearRGB=True, use_uv_texture=True, texture_resolution=2048
     )
     
-    # Mover meshes para CPU se pytorch3d não tiver suporte GPU
-    if py3d_device == "cpu" and device.type == "cuda":
-        logger.info("[ISOMER] Movendo meshes para CPU para projeção (pytorch3d sem suporte GPU)")
-        meshes = meshes.to("cpu")
-        projection_device = "cpu"
-    else:
-        projection_device = device
-    
     try:
         save_glb_addr = projection(
             meshes,
-            masks=multi_view_mask_proj.to(projection_device),
-            images=rgb_multi_view.to(projection_device),
-            azimuths=to_tensor_(azimuths).to(projection_device),
-            elevations=to_tensor_(elevations).to(projection_device),
-            weights=to_tensor_(color_weights).to(projection_device),
+            masks=multi_view_mask_proj.to(device),
+            images=rgb_multi_view.to(device),
+            azimuths=to_tensor_(azimuths),
+            elevations=to_tensor_(elevations),
+            weights=to_tensor_(color_weights),
             fov=30,
             radius=radius,
             save_dir=TMP_DIR,
             save_addrs=save_paths,
         )
-    except RuntimeError as e:
-        if "Not compiled with GPU support" in str(e) or "CUDA" in str(e):
-            logger.warning(f"[ISOMER] Erro GPU detectado: {e}. Tentando com CPU...")
-            # Tentar novamente com CPU
-            meshes = meshes.to("cpu")
-            save_glb_addr = projection(
-                meshes,
-                masks=multi_view_mask_proj.to("cpu"),
-                images=rgb_multi_view.to("cpu"),
-                azimuths=to_tensor_(azimuths).to("cpu"),
-                elevations=to_tensor_(elevations).to("cpu"),
-                weights=to_tensor_(color_weights).to("cpu"),
-                fov=30,
-                radius=radius,
-                save_dir=TMP_DIR,
-                save_addrs=save_paths,
-            )
-        else:
-            raise
     finally:
         # Restaurar função original
         isomer_utils.save_py3dmesh_with_trimesh_fast = original_save
@@ -586,16 +544,14 @@ def save_py3dmesh_with_trimesh_fast_local(
                 
                 logger.info(f"Exportando mesh com textura UV ({texture_resolution}x{texture_resolution})")
                 mesh.export(save_glb_path)
-                # Se exportou com textura, não precisamos do fix_vert_color_glb que é para vertex colors
-                return
-            
+                
             except Exception as e:
                 logger.warning(f"Falha ao criar textura UV, usando vertex colors: {e}")
                 # Fallback para vertex colors
                 mesh = trimesh.Trimesh(vertices=vertices, faces=triangles, vertex_colors=np_color)
                 mesh.remove_unreferenced_vertices()
                 mesh.export(save_glb_path)
-            
+                
         except Exception as e:
             logger.warning(f"Erro ao processar mesh com textura, usando método básico: {e}")
             # Fallback completo
@@ -607,8 +563,8 @@ def save_py3dmesh_with_trimesh_fast_local(
         mesh = trimesh.Trimesh(vertices=vertices, faces=triangles, vertex_colors=np_color)
         mesh.remove_unreferenced_vertices()
         mesh.export(save_glb_path)
-
-# Fix material para GLB (apenas se não tiver textura/tiver falhado)
+    
+    # Fix material para GLB
     if save_glb_path.endswith(".glb"):
         fix_vert_color_glb(save_glb_path)
 
