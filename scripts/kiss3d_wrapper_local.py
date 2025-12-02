@@ -227,15 +227,19 @@ class kiss3d_wrapper(object):
 
     def get_detailed_prompt(self, prompt, seed=None):
         if self.llm_model is not None:
-            instruction = (
-                "You are an expert 3D asset prompt engineer. Given the base caption below, "
-                "produce a single, detailed paragraph that describes the object's geometry, "
-                "materials, colors, finishes, logos/text, and any distinctive features for all four canonical views "
-                "(front, left, back, right). Avoid backgrounds or scene descriptions; focus strictly on the object. "
-                "Mention relative proportions and any manufacturing marks or textures if visible."
+            # System prompt para refinar o caption
+            system_prompt = (
+                "You are an expert 3D asset director. When the user provides a base caption, expand it into a precise, "
+                "engineering-grade description that can guide a multi-view image-to-3D pipeline. Focus exclusively on the object itself "
+                "(no environments or backgrounds). Describe geometry, materials, logos or labels, manufacturing details, wear, and any "
+                "asymmetries. Explicitly mention what should be visible from the front, left, rear, and right views so that a 2×4 RGB/normal "
+                "grid can be rendered. Use complete sentences in a single paragraph, favoring factual language over stylistic flourishes. "
+                "Do not invent accessories that were not implied by the caption; instead, clarify existing features. "
+                "Return only the enriched description in English."
             )
-            llm_input = f"{instruction}\n\nBase caption:\n{prompt}\n"
-            detailed_prompt = get_llm_response(self.llm_model, self.llm_tokenizer, llm_input, seed=seed)
+            # User prompt é o caption base
+            user_prompt = prompt
+            detailed_prompt = get_llm_response(self.llm_model, self.llm_tokenizer, user_prompt, seed=seed, system_prompt=system_prompt)
 
             logger.info(f'LLM refined prompt result: "{detailed_prompt}"')
             return detailed_prompt
@@ -1251,16 +1255,32 @@ def init_wrapper_from_config(
         logger.info("==> Loading LLM ...")
         log_memory_usage(logger, "Antes de carregar LLM")
         llm_device = llm_configs.get("device", "cpu")
-        logger.info(f"[MODEL] Carregando LLM: device={llm_device}")
-        llm, llm_tokenizer = load_llm_model(
-            llm_configs["base_model"],
-            device_map=llm_device,
-        )
-        if isinstance(llm_device, str) and llm_device.startswith("cuda"):
-            llm.to(llm_device)
-        log_memory_usage(logger, "Após carregar LLM")
-        _log_cuda_allocation(llm_device, "load llm model")
-        logger.info("[MODEL] LLM carregado com sucesso")
+        
+        # Verificar se Ollama está disponível primeiro
+        from models.llm.llm import check_ollama_available
+        if check_ollama_available():
+            logger.info("[MODEL] Ollama detectado! Usando Ollama API ao invés de Hugging Face")
+            llm, llm_tokenizer = 'ollama', None
+            logger.info("[MODEL] LLM usando Ollama API (não carrega modelo na GPU)")
+        else:
+            logger.info(f"[MODEL] Ollama não disponível. Tentando carregar do Hugging Face: device={llm_device}")
+            try:
+                llm, llm_tokenizer = load_llm_model(
+                    llm_configs["base_model"],
+                    device_map=llm_device,
+                    use_ollama=False,  # Forçar Hugging Face já que Ollama não está disponível
+                )
+                # Se retornou 'ollama', não é um modelo PyTorch, então não precisa mover para CUDA
+                if llm != 'ollama' and isinstance(llm_device, str) and llm_device.startswith("cuda"):
+                    llm.to(llm_device)
+                log_memory_usage(logger, "Após carregar LLM")
+                if llm != 'ollama':
+                    _log_cuda_allocation(llm_device, "load llm model")
+                logger.info("[MODEL] LLM carregado com sucesso do Hugging Face")
+            except Exception as e:
+                logger.error(f"[MODEL] Erro ao carregar LLM do Hugging Face: {e}")
+                logger.error("[MODEL] LLM não será usado.")
+                llm, llm_tokenizer = None, None
     else:
         logger.info("[MODEL] LLM não será carregado (disable_llm=True ou não configurado)")
         llm, llm_tokenizer = None, None
