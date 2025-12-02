@@ -639,6 +639,7 @@ def main():
     parser.add_argument("--output", type=str, required=True, help="Diretório de saída")
     parser.add_argument("--config", type=str, default="Kiss3DGen/pipeline/pipeline_config/default.yaml")
     parser.add_argument("--fast-mode", action="store_true", help="Modo rápido")
+    parser.add_argument("--disable-llm", action="store_true", help="Desabilitar LLM")
     parser.add_argument("--use-controlnet", action="store_true", help="Usar ControlNet")
     parser.add_argument("--enable-redux", action="store_true", help="Habilitar Redux")
     parser.add_argument("--use-mv-rgb", action="store_true", default=True, help="Usar RGB multiview")
@@ -687,13 +688,32 @@ def main():
         if not config_path.is_absolute():
             config_path = project_root / config_path
         
-        k3d_wrapper = init_wrapper_from_config(str(config_path))
+        logger.info(f"[INIT] Carregando configuração de: {config_path}")
+        logger.info("[INIT] Chamando init_wrapper_from_config...")
+        logger.info("[INIT] Isso pode levar vários minutos (carregamento de modelos)...")
+        
+        # Adicionar flush para garantir que logs sejam escritos imediatamente
+        import sys
+        sys.stdout.flush()
+        sys.stderr.flush()
+        
+        k3d_wrapper = init_wrapper_from_config(
+            str(config_path),
+            fast_mode=args.fast_mode,
+            disable_llm=getattr(args, 'disable_llm', False),  # Padrão: False (LLM habilitado)
+            load_controlnet=args.use_controlnet,
+            load_redux=args.enable_redux,
+        )
         logger.info("[OK] Pipeline inicializado")
         checkpoint.mark_stage_success("initialization")
+    except KeyboardInterrupt:
+        logger.error("[ERRO] Pipeline interrompido pelo usuário")
+        sys.exit(1)
     except Exception as e:
         error_msg = f"Erro ao inicializar pipeline: {e}"
         checkpoint.mark_stage_error("initialization", error_msg, traceback.format_exc())
         logger.error(error_msg)
+        logger.error(f"[ERRO] Traceback completo:\n{traceback.format_exc()}")
         sys.exit(1)
     
     # Executar pipeline

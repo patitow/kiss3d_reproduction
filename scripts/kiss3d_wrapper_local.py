@@ -331,7 +331,16 @@ class kiss3d_wrapper(object):
         mv_device = self.config["multiview"].get("device", "cpu")
         gen_device = mv_device if isinstance(mv_device, str) and mv_device.startswith("cuda") else "cpu"
 
-        generator = torch.Generator(device=gen_device).manual_seed(seed)
+        # Garantir que o pipeline está no device correto
+        if hasattr(self.multiview_pipeline, 'device'):
+            pipeline_device = str(self.multiview_pipeline.device) if hasattr(self.multiview_pipeline.device, '__str__') else str(next(self.multiview_pipeline.vae.parameters()).device)
+        else:
+            pipeline_device = str(next(self.multiview_pipeline.vae.parameters()).device)
+        
+        # Se o pipeline está em CUDA mas a imagem está em CPU, garantir que o pipeline processe corretamente
+        # O diffusers já cuida disso internamente, mas vamos garantir que o generator está no device correto
+        generator = torch.Generator(device=pipeline_device if "cuda" in pipeline_device else gen_device).manual_seed(seed)
+        
         with self.context():
             mv_image = self.multiview_pipeline(
                 image,
@@ -700,6 +709,8 @@ class kiss3d_wrapper(object):
         
         # LRM reconstruction
         # Habilitar export_texmap para ter texturas intermediárias
+        # IMPORTANTE: Usar a mesma ordem de azimutes que o ISOMER espera: [0, 90, 180, 270]
+        # Esta ordem corresponde às vistas do Zero123++: [front, right, back, left]
         with self.context():
             vertices, faces, lrm_multi_view_normals, lrm_multi_view_rgb, lrm_multi_view_albedo = lrm_reconstruct(
                 self.recon_model,
@@ -708,7 +719,7 @@ class kiss3d_wrapper(object):
                 name=self.uuid,
                 export_texmap=True,  # HABILITADO: exportar com texturas
                 input_camera_type="kiss3d",
-                render_azimuths=[270, 0, 90, 180],
+                render_azimuths=[0, 90, 180, 270],  # CORRIGIDO: ordem original do projeto
                 render_elevations=[5, 5, 5, 5],
                 render_radius=isomer_radius,
             )
@@ -733,6 +744,20 @@ class kiss3d_wrapper(object):
             logger.info(f"Aumentando stage2_steps para {reconstruction_stage2_steps} para melhor qualidade")
         
         save_paths = [os.path.join(OUT_DIR, f"{self.uuid}.glb"), os.path.join(OUT_DIR, f"{self.uuid}.obj")]
+        
+        # Garantir que vertices e faces estão no device correto (CUDA) para ISOMER
+        # lrm_reconstruct retorna em CPU, mas ISOMER precisa em CUDA
+        if isinstance(vertices, torch.Tensor):
+            vertices = vertices.to(recon_device)
+        elif isinstance(vertices, np.ndarray):
+            vertices = torch.from_numpy(vertices).to(recon_device)
+        if isinstance(faces, torch.Tensor):
+            faces = faces.to(recon_device)
+        elif isinstance(faces, np.ndarray):
+            faces = torch.from_numpy(faces).to(recon_device)
+        
+        # IMPORTANTE: Passar explicitamente os azimutes para garantir consistência com LRM
+        # A ordem [0, 90, 180, 270] corresponde a [front, right, back, left]
         isomer_reconstruct(
             rgb_multi_view=rgb_multi_view,
             normal_multi_view=normal_multi_view,
@@ -741,6 +766,8 @@ class kiss3d_wrapper(object):
             faces=faces,
             save_paths=save_paths,
             radius=isomer_radius,
+            azimuths=[0, 90, 180, 270],  # CORRIGIDO: ordem explícita para consistência
+            elevations=[5, 5, 5, 5],
             reconstruction_stage1_steps=stage1_steps,
             reconstruction_stage2_steps=reconstruction_stage2_steps,
             # Parâmetros de qualidade melhorados
@@ -793,7 +820,8 @@ def init_wrapper_from_config(
         if recon_fast:
             config_["reconstruction"]["stage2_steps"] = max(10, recon_fast)
         config_["caption"]["device"] = "cpu"
-        disable_llm = True
+        # Não forçar disable_llm no fast_mode - deixar o usuário decidir
+        # Se o usuário quiser desabilitar, pode passar --disable-llm explicitamente
 
     # Verificar se fp8 está disponível no PyTorch
     try:
@@ -1179,24 +1207,44 @@ def init_wrapper_from_config(
     log_memory_usage(logger, "Antes de carregar LRM")
     recon_device = config_["reconstruction"].get("device", "cpu")
     logger.info(f"[MODEL] Carregando LRM: device={recon_device}")
+    logger.info("[MODEL] [LRM] Passo 1/7: Carregando configuração do modelo...")
+    import sys
+    sys.stdout.flush()
     recon_model_config = OmegaConf.load(config_["reconstruction"]["model_config"])
+    logger.info("[MODEL] [LRM] Passo 2/7: Instanciando modelo a partir da configuração...")
+    sys.stdout.flush()
     recon_model = instantiate_from_config(recon_model_config.model_config)
+    logger.info("[MODEL] [LRM] Passo 3/7: Modelo instanciado, verificando checkpoint...")
+    sys.stdout.flush()
     model_ckpt_path = config_["reconstruction"]["base_model"]
     if not os.path.exists(model_ckpt_path):
         logger.info("[MODEL] LRM checkpoint não encontrado localmente, baixando do HuggingFace...")
+        sys.stdout.flush()
         model_ckpt_path = hf_hub_download(repo_id="LTT/PRM", filename="final_ckpt.ckpt", repo_type="model")
         logger.info(f"[MODEL] LRM checkpoint baixado para: {model_ckpt_path}")
-    logger.info(f"[MODEL] Carregando pesos do LRM de: {model_ckpt_path}")
+        sys.stdout.flush()
+    logger.info(f"[MODEL] [LRM] Passo 4/7: Carregando pesos do LRM de: {model_ckpt_path}")
+    sys.stdout.flush()
     state_dict = torch.load(model_ckpt_path, map_location="cpu", weights_only=True)["state_dict"]
+    logger.info("[MODEL] [LRM] Passo 5/7: Processando state_dict...")
+    sys.stdout.flush()
     state_dict = {k[14:]: v for k, v in state_dict.items() if k.startswith("lrm_generator.")}
+    logger.info("[MODEL] [LRM] Passo 6/7: Carregando state_dict no modelo...")
+    sys.stdout.flush()
     recon_model.load_state_dict(state_dict, strict=True)
+    logger.info("[MODEL] [LRM] Movendo modelo para dispositivo...")
+    sys.stdout.flush()
     recon_model.to(recon_device)
     logger.info("[MODEL] Inicializando geometria FlexiCubes do LRM...")
+    sys.stdout.flush()
     recon_model.init_flexicubes_geometry(recon_device, fovy=50.0)
+    logger.info("[MODEL] [LRM] Geometria inicializada, configurando eval()...")
+    sys.stdout.flush()
     recon_model.eval()
     log_memory_usage(logger, "Após carregar LRM")
     _log_cuda_allocation(recon_device, "load reconstruction model")
     logger.info("[MODEL] LRM carregado e inicializado com sucesso")
+    sys.stdout.flush()
 
     llm_configs = None if disable_llm else config_.get("llm", None)
     if llm_configs is not None:
