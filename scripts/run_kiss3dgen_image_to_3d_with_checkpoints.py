@@ -455,6 +455,9 @@ class PipelineCheckpoint:
     
     def save_status(self):
         """Salva status atual"""
+        # Garantir que o diretório existe antes de salvar
+        if not self.checkpoint_dir.exists():
+            self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         self.status_file.write_text(json.dumps(self.status, indent=2, ensure_ascii=False), encoding='utf-8')
     
     def mark_stage_start(self, stage: str):
