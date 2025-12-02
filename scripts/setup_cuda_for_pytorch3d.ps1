@@ -116,3 +116,4 @@ Write-Host "  Ou configure as variaveis de ambiente do sistema" -ForegroundColor
 
 
 
+
