@@ -381,6 +381,23 @@ class kiss3d_wrapper(object):
                 logger.info(f"[MULTIVIEW] Movendo vision_encoder de {vision_device} para {mv_device}")
                 self.multiview_pipeline.vision_encoder.to(mv_device)
         
+        # Garantir que o text_encoder também está no device correto
+        if hasattr(self.multiview_pipeline, 'text_encoder'):
+            try:
+                text_encoder_device = next(self.multiview_pipeline.text_encoder.parameters()).device
+                if str(text_encoder_device) != mv_device:
+                    logger.info(f"[MULTIVIEW] Movendo text_encoder de {text_encoder_device} para {mv_device}")
+                    self.multiview_pipeline.text_encoder.to(mv_device)
+                    # Verificar novamente
+                    text_encoder_device = next(self.multiview_pipeline.text_encoder.parameters()).device
+                    logger.info(f"[MULTIVIEW] text_encoder agora em {text_encoder_device}")
+            except Exception as e:
+                logger.warning(f"[MULTIVIEW] Erro ao verificar/mover text_encoder: {e}")
+        
+        # Garantir que o tokenizer também está configurado (não precisa de device, mas verificar)
+        if hasattr(self.multiview_pipeline, 'tokenizer') and self.multiview_pipeline.tokenizer is None:
+            logger.warning("[MULTIVIEW] Tokenizer está None!")
+        
         # Verificar device final do VAE para o generator
         vae_device = next(self.multiview_pipeline.vae.parameters()).device
         generator = torch.Generator(device=str(vae_device)).manual_seed(seed)
