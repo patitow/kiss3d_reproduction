@@ -11,6 +11,8 @@ flux:
   num_inference_steps: 20
   seed: 42
   device: 'cuda:0'  # RTX 3060 12GB
+  text_encoder_device: 'cpu'
+  text_encoder_dtype: 'fp32'
 
 multiview:
   base_model: "sudo-ai/zero123plus-v1.2"
