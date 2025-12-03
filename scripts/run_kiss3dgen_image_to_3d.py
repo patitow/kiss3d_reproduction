@@ -60,6 +60,68 @@ if not ninja_found:
             os.environ["PATH"] = str(scripts_path) + os.pathsep + current_path
             print(f"[INFO] Scripts adicionado ao PATH: {scripts_path}")
 
+
+def _prepend_env_list(var_name: str, new_paths) -> None:
+    if not new_paths:
+        return
+    existing_entries = [
+        entry for entry in os.environ.get(var_name, "").split(os.pathsep) if entry
+    ]
+    changed = False
+    for candidate in new_paths:
+        candidate_str = str(candidate)
+        if not candidate_str or not os.path.exists(candidate_str):
+            continue
+        if candidate_str not in existing_entries:
+            existing_entries.insert(0, candidate_str)
+            changed = True
+    if changed and existing_entries:
+        os.environ[var_name] = os.pathsep.join(existing_entries)
+        print(f"[INFO] Variável {var_name} atualizada com diretórios MSVC/SDK.")
+
+
+def _ensure_msvc_env(cl_path_str: str | None) -> None:
+    if not cl_path_str:
+        return
+    cl_path = Path(cl_path_str)
+
+    msvc_root = None
+    for parent in cl_path.parents:
+        candidate = parent
+        if (candidate / "include").exists() and (candidate / "lib").exists():
+            msvc_root = candidate
+            break
+
+    if msvc_root is None:
+        print(f"[AVISO] Não foi possível localizar diretórios MSVC a partir de {cl_path}")
+        return
+
+    include_paths = [msvc_root / "include"]
+    lib_paths = [msvc_root / "lib" / "x64"]
+
+    kits_base = Path("C:/Program Files (x86)/Windows Kits/10")
+    include_root = kits_base / "Include"
+    lib_root = kits_base / "Lib"
+    kit_version = None
+
+    if include_root.exists():
+        versions = sorted([p for p in include_root.iterdir() if p.is_dir()], reverse=True)
+        if versions:
+            kit_version = versions[0]
+            include_paths.extend(
+                kit_version / subdir for subdir in ("ucrt", "shared", "um", "winrt", "cppwinrt")
+            )
+
+    if kit_version and lib_root.exists():
+        lib_version = lib_root / kit_version.name
+        lib_paths.extend([
+            lib_version / "ucrt" / "x64",
+            lib_version / "um" / "x64",
+        ])
+
+    _prepend_env_list("INCLUDE", include_paths)
+    _prepend_env_list("LIB", lib_paths)
+
 # Configurar CUDA_HOME e PATH - CRÍTICO: Deve ser feito ANTES de qualquer import do torch
 # Priorizar CUDA 12.1+ para compatibilidade com VS 2019/2022
 cuda_base = "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA"
@@ -213,19 +275,23 @@ if vs_found:
                     line = line.strip()
                     if '=' in line and not line.startswith('_'):
                         key, value = line.split('=', 1)
-                        # Atualizar PATH e outras variáveis importantes
-                        if key == 'PATH':
-                            # Adicionar VS 2019 no início
-                            current_path = os.environ.get("PATH", "")
-                            if value not in current_path:
-                                os.environ["PATH"] = value + os.pathsep + current_path
-                        elif key in ["INCLUDE", "LIB", "LIBPATH"]:
-                            os.environ[key] = value
+                        key_upper = key.upper()
+                        # Atualizar PATH e outras variáveis importantes (case-insensitive)
+                        if key_upper == 'PATH':
+                            os.environ['PATH'] = value
+                        elif key_upper in {"INCLUDE", "LIB", "LIBPATH"}:
+                            os.environ[key_upper] = value
                 print("[INFO] VS 2019 ambiente configurado via vcvarsall.bat")
+                print(f"[DEBUG] INCLUDE={os.environ.get('INCLUDE', '<none>')}")
+                print(f"[DEBUG] LIB={os.environ.get('LIB', '<none>')}")
         except Exception as e:
             print(f"[AVISO] Não foi possível executar vcvarsall.bat: {e}")
             print("[INFO] Continuando com configuração manual do PATH")
-    
+
+    _ensure_msvc_env(vs2019_cl_path)
+    print(f"[DEBUG] INCLUDE(after fix)={os.environ.get('INCLUDE', '<none>')}")
+    print(f"[DEBUG] LIB(after fix)={os.environ.get('LIB', '<none>')}")
+
     print("[OK] VS 2019 configurado corretamente")
 else:
     print("[ERRO] VS 2019 não encontrado! Compilação vai falhar.")

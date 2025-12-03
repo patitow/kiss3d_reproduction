@@ -2,6 +2,34 @@
 
 Projeto de Visão Computacional para gerar malhas 3D a partir de uma ou mais imagens, utilizando LLM multimodal para gerar descrições extremamente detalhadas da cena que guiam o refinamento da malha.
 
+## Estrutura do Projeto
+
+```mermaid
+graph TD
+    A[Input Image] --> B[Florence-2 Caption]
+    B --> C[LLM Refinamento de Prompt]
+    C --> D{pipeline_mode}
+
+    %% Multiview Branch
+    D -->|multiview| M1[Zero123PP Multiview]
+    M1 --> M2[LRM Reconstrucao]
+    M2 --> M3[ISOMER Refinamento]
+    M3 --> M4[Export OBJ/GLB]
+
+    %% Flux Branch
+    D -->|flux| F1[Flux + ControlNet + Redux]
+    F1 --> F2[LRM Reconstrucao]
+    F2 --> F3[ISOMER Refinamento]
+    F3 --> F4[Export OBJ/GLB]
+
+    %% Checkpoints
+    C --> CP1[Checkpoint caption.txt]
+    M1 --> CP2[Checkpoint mv_images]
+    M2 --> CP3[Checkpoint mv_mesh.glb]
+    F1 --> CP4[Checkpoint flux_bundle.png]
+    F2 --> CP5[Checkpoint flux_mesh.glb]
+```
+
 ## 📋 Objetivo
 
 Gerar uma malha 3D a partir de uma ou mais imagens, onde primeiro um texto descritivo da cena será gerado utilizando LLM para gerar o texto extremamente detalhado. O normal map e outras informações serão usadas de forma que a malha seja refinada de acordo com o texto e com essas técnicas.

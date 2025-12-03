@@ -25,7 +25,11 @@ from models.llm.llm import load_llm_model, get_llm_response
 from diffusers import FluxPipeline, DiffusionPipeline, EulerAncestralDiscreteScheduler
 from diffusers.models.controlnets.controlnet_flux import FluxControlNetModel
 from diffusers.schedulers import FlowMatchHeunDiscreteScheduler
-
+from Kiss3DGen.pipeline.custom_pipelines.pipeline_flux_prior_redux import FluxPriorReduxPipeline
+from Kiss3DGen.pipeline.custom_pipelines.pipeline_flux_controlnet_image_to_image import (
+    FluxControlNetImg2ImgPipeline,
+)
+from Kiss3DGen.pipeline.custom_pipelines.pipeline_flux_img2img import FluxImg2ImgPipeline
 try:
     import cv2
 except Exception:
@@ -45,6 +49,7 @@ from kiss3d_utils_local import (
     isomer_reconstruct,
     render_3d_bundle_image_from_mesh,
     KISS3D_ROOT,
+    PROJECT_ROOT,
 )
 
 # Importar funções de logging se disponíveis
@@ -66,13 +71,11 @@ except ImportError:
             msg += f" | Memory: {memory_mb:.1f} MB"
         logger.info(msg)
 
-CUSTOM_PIPELINE_DIR = KISS3D_ROOT / "pipeline" / "custom_pipelines"
-if str(CUSTOM_PIPELINE_DIR) not in sys.path:
-    sys.path.insert(0, str(CUSTOM_PIPELINE_DIR))
-
 if TYPE_CHECKING:
-    from pipeline_flux_prior_redux import FluxPriorReduxPipeline
-    from pipeline_flux_controlnet_image_to_image import FluxControlNetImg2ImgPipeline
+    from Kiss3DGen.pipeline.custom_pipelines.pipeline_flux_prior_redux import FluxPriorReduxPipeline
+    from Kiss3DGen.pipeline.custom_pipelines.pipeline_flux_controlnet_image_to_image import (
+        FluxControlNetImg2ImgPipeline
+    )
 
 # Suprimir warnings comuns e não críticos
 warnings.filterwarnings('ignore', message='.*Some weights of.*were not used.*')
@@ -1278,65 +1281,7 @@ class kiss3d_wrapper(object):
 
         return save_paths[0]  # Retorna o .glb
 
-
-def init_wrapper_from_config(
-    config_path,
-    fast_mode=False,
-    disable_llm=False,
-    load_controlnet=True,
-    load_redux=True,
-):
-    from pipeline_flux_prior_redux import FluxPriorReduxPipeline
-    from pipeline_flux_controlnet_image_to_image import FluxControlNetImg2ImgPipeline
-    from pipeline_flux_img2img import FluxImg2ImgPipeline
-
-    with open(config_path, "r") as config_file:
-        config_ = yaml.load(config_file, yaml.FullLoader)
-
-    if torch.cuda.is_available():
-        total_mem_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-        if not fast_mode and total_mem_gb <= 12.5:
-            fast_mode = True
-            logger.warning(
-                "VRAM <= %.1fGB detectada. Fast mode habilitado automaticamente para evitar OOM.",
-                total_mem_gb,
-            )
-
-    if fast_mode:
-        flux_fast = config_["flux"].get("num_inference_steps_fast")
-        if flux_fast:
-            config_["flux"]["num_inference_steps"] = min(
-                config_["flux"].get("num_inference_steps", flux_fast),
-                flux_fast,
-            )
-        mv_fast = config_["multiview"].get("num_inference_steps_fast")
-        if mv_fast:
-            config_["multiview"]["num_inference_steps"] = min(
-                config_["multiview"].get("num_inference_steps", mv_fast),
-                mv_fast,
-            )
-        recon_fast = config_["reconstruction"].get("stage2_steps_fast")
-        if recon_fast:
-            config_["reconstruction"]["stage2_steps"] = max(10, recon_fast)
-        config_["caption"]["device"] = "cpu"
-        # Não forçar disable_llm no fast_mode - deixar o usuário decidir
-        # Se o usuário quiser desabilitar, pode passar --disable-llm explicitamente
-
-    # Verificar se fp8 está disponível no PyTorch
-    try:
-        _ = torch.float8_e4m3fn
-        fp8_available = True
-    except (AttributeError, TypeError):
-        fp8_available = False
-        logger.warning("[MODEL] fp8 não está disponível no PyTorch. Usando bfloat16 como fallback.")
-    
-    dtype_ = {
-        "fp8": torch.bfloat16 if not fp8_available else torch.float8_e4m3fn,  # Fallback para bfloat16 se fp8 não disponível
-        "bf16": torch.bfloat16,
-        "fp16": torch.float16,
-        "fp32": torch.float32,
-    }
-
+def _initialize_flux_branch(config_, dtype_, fast_mode, load_controlnet, load_redux):
     logger.info("==> Loading Flux model ...")
     log_memory_usage(logger, "Início do carregamento de modelos")
     flux_device = config_["flux"].get("device", "cpu")
@@ -1351,20 +1296,17 @@ def init_wrapper_from_config(
     flux_lora_pth = config_["flux"].get("lora", None)
     flux_redux_pth = config_["flux"].get("redux", None) if load_redux else None
     flux_cpu_offload = config_["flux"].get("cpu_offload", False)
-    
+
     logger.info(f"[MODEL] Configuração Flux: device={flux_device}, dtype={flux_dtype}, cpu_offload={flux_cpu_offload}")
     logger.info(f"[MODEL] ControlNet: {'carregar' if load_controlnet else 'não carregar'}")
     logger.info(f"[MODEL] Redux: {'carregar' if load_redux else 'não carregar'}")
 
     def _load_flux_pipeline(model_id: str):
         if model_id.endswith("safetensors") or model_id.startswith("http"):
-            # Se for URL do HuggingFace, baixar o arquivo
             if model_id.startswith("http"):
                 logger.info(f"[MODEL] Baixando modelo FLUX fp8 de: {model_id}")
                 try:
-                    # Extrair repo_id e filename da URL
                     if "huggingface.co" in model_id:
-                        # Formato: https://huggingface.co/Comfy-Org/flux1-dev/resolve/main/flux1-dev-fp8.safetensors
                         parts = model_id.split("/")
                         repo_id = f"{parts[3]}/{parts[4]}"
                         filename = parts[-1]
@@ -1381,43 +1323,36 @@ def init_wrapper_from_config(
                 except Exception as e:
                     logger.error(f"[MODEL] Erro ao baixar modelo: {e}")
                     raise
-            
-            # Resolver caminho relativo (pode ser relativo a Kiss3DGen ou ao projeto)
+
             if not os.path.isabs(model_id) and not model_id.startswith("http"):
                 original_path = model_id
-                from kiss3d_utils_local import PROJECT_ROOT, KISS3D_ROOT
-                
-                # Lista de caminhos para tentar
                 candidate_paths = [
-                    model_id,  # Caminho original (relativo ao CWD)
-                    os.path.abspath(model_id),  # Absoluto do CWD
-                    KISS3D_ROOT / model_id.lstrip("./"),  # Relativo a Kiss3DGen
-                    PROJECT_ROOT / model_id.lstrip("./"),  # Relativo à raiz do projeto
-                    PROJECT_ROOT / model_id.replace("./", ""),  # Sem ./
+                    model_id,
+                    os.path.abspath(model_id),
+                    KISS3D_ROOT / model_id.lstrip("./"),
+                    PROJECT_ROOT / model_id.lstrip("./"),
+                    PROJECT_ROOT / model_id.replace("./", ""),
                 ]
-                
+
                 found = False
                 for candidate in candidate_paths:
-                    candidate_str = str(candidate) if hasattr(candidate, '__str__') else candidate
+                    candidate_str = str(candidate) if hasattr(candidate, "__str__") else candidate
                     if os.path.exists(candidate_str):
                         model_id = os.path.abspath(candidate_str)
                         logger.info(f"[MODEL] Modelo encontrado em: {model_id}")
                         found = True
                         break
-                
+
                 if not found:
                     logger.error(f"[MODEL] Arquivo do modelo não encontrado: {original_path}")
                     logger.error("[MODEL] Caminhos tentados:")
                     for cp in candidate_paths:
                         logger.error(f"  - {cp}")
                     raise FileNotFoundError(f"Arquivo do modelo não encontrado: {original_path}")
-            
-            # Verificar se arquivo existe
+
             if not os.path.exists(model_id):
                 raise FileNotFoundError(f"Arquivo do modelo não encontrado: {model_id}")
-            
-            # Usar bfloat16 para fp8 safetensors (fp8 não é suportado diretamente pelo PyTorch)
-            # Mesmo que o modelo seja fp8 quantizado, carregamos como bfloat16
+
             if flux_dtype == "fp8":
                 load_dtype = torch.bfloat16
                 logger.info("[MODEL] Modelo fp8 quantizado será carregado como bfloat16 (fp8 não suportado nativamente)")
@@ -1428,16 +1363,13 @@ def init_wrapper_from_config(
                 model_id,
                 torch_dtype=load_dtype,
             )
-        # Se for um modelo do HuggingFace (não safetensors local), usar dtype apropriado
-        # Não usar fp8 para modelos não quantizados do HuggingFace
+
         if flux_dtype == "fp8":
-            # fp8 não é suportado nativamente pelo PyTorch
-            # Usar bfloat16 como fallback para modelos do HuggingFace
             load_dtype = torch.bfloat16
             logger.warning("[MODEL] fp8 não suportado. Usando bfloat16 como fallback para modelo do HuggingFace.")
         else:
             load_dtype = dtype_[flux_dtype]
-        
+
         return FluxImg2ImgPipeline.from_pretrained(
             model_id,
             torch_dtype=load_dtype,
@@ -1446,13 +1378,10 @@ def init_wrapper_from_config(
     try:
         logger.info(f"[MODEL] Carregando Flux base model: {flux_base_model_pth}")
         log_memory_usage(logger, "Antes de carregar Flux base")
-        # Se for URL, tentar baixar primeiro
         if flux_base_model_pth and flux_base_model_pth.startswith("http"):
             logger.info("[MODEL] Detectada URL do modelo, tentando baixar...")
             flux_pipe = _load_flux_pipeline(flux_base_model_pth)
-        # Validar se o caminho do modelo fp8 existe antes de tentar carregar
         elif flux_base_model_pth and flux_base_model_pth.endswith("safetensors"):
-            # Tentar carregar o modelo local primeiro (a função _load_flux_pipeline resolve o caminho)
             try:
                 flux_pipe = _load_flux_pipeline(flux_base_model_pth)
             except FileNotFoundError as e:
@@ -1634,7 +1563,10 @@ def init_wrapper_from_config(
         logger.info("[MODEL] Flux Redux não será carregado (load_redux=False ou não configurado)")
 
     _log_cuda_allocation(flux_device, "load flux model")
+    return flux_pipe, flux_redux_pipe
 
+
+def _initialize_multiview_branch(config_):
     logger.info("==> Loading multiview diffusion model ...")
     log_memory_usage(logger, "Antes de carregar multiview model")
     multiview_device = config_["multiview"].get("device", "cpu")
@@ -1644,35 +1576,28 @@ def init_wrapper_from_config(
         else torch.float32
     )
     logger.info(f"[MODEL] Carregando Zero123++ multiview: device={multiview_device}, dtype={mv_dtype}")
-    
-    # Verificar se há modelo local na pasta models
+
     custom_pipeline_path = config_["multiview"].get("custom_pipeline", None)
     base_model = config_["multiview"]["base_model"]
     local_model_path = config_["multiview"].get("local_model", None)
-    
-    # Tentar encontrar modelo local
+
     if local_model_path and os.path.exists(local_model_path):
-        # Verificar se tem model_index.json
         if os.path.exists(os.path.join(local_model_path, "model_index.json")):
             logger.info(f"[MODEL] Modelo local encontrado: {local_model_path}")
         else:
             logger.warning(f"[MODEL] Diretório local existe mas não tem model_index.json: {local_model_path}")
             local_model_path = None
     elif custom_pipeline_path and os.path.exists(custom_pipeline_path):
-        # Fallback: usar o diretório do custom pipeline se tiver model_index.json
         if os.path.exists(os.path.join(custom_pipeline_path, "model_index.json")):
             local_model_path = custom_pipeline_path
             logger.info(f"[MODEL] Modelo local encontrado no custom_pipeline: {local_model_path}")
         else:
             local_model_path = None
-    
-    # Tentar carregar modelo
+
     multiview_pipeline = None
     load_errors = []
-    
-    # Estratégia 1: Tentar carregar modelo local se disponível
+
     if local_model_path:
-        # Primeiro tentar sem safetensors (o modelo zero123++ usa .bin)
         try:
             logger.info(f"[MODEL] Tentando carregar modelo local: {local_model_path}")
             logger.info("[MODEL] Zero123++ usa arquivos .bin, tentando sem safetensors primeiro")
@@ -1680,15 +1605,13 @@ def init_wrapper_from_config(
                 local_model_path,
                 custom_pipeline=custom_pipeline_path,
                 torch_dtype=mv_dtype,
-                use_safetensors=False,  # Zero123++ usa .bin, não safetensors
+                use_safetensors=False,
             )
             logger.info("[MODEL] Zero123++ carregado do modelo local (arquivos .bin)")
         except Exception as e:
-            load_errors.append(f"Local sem safetensors: {e}")
+            load_errors.append(f"Local (bin): {e}")
             logger.warning(f"[MODEL] Falha ao carregar modelo local sem safetensors: {e}")
-            # Fallback: tentar com safetensors (caso tenha)
             try:
-                logger.info("[MODEL] Tentando com safetensors como fallback...")
                 multiview_pipeline = DiffusionPipeline.from_pretrained(
                     local_model_path,
                     custom_pipeline=custom_pipeline_path,
@@ -1697,39 +1620,37 @@ def init_wrapper_from_config(
                 )
                 logger.info("[MODEL] Zero123++ carregado do modelo local com safetensors (fallback)")
             except Exception as e2:
-                load_errors.append(f"Local com safetensors: {e2}")
+                load_errors.append(f"Local (safetensors): {e2}")
                 logger.warning(f"[MODEL] Falha ao carregar modelo local com safetensors: {e2}")
-    
-    # Estratégia 2: Carregar do HuggingFace (cache ou download)
+
     if multiview_pipeline is None:
         try:
-            logger.info(f"[MODEL] Tentando carregar do HuggingFace: {base_model}")
             multiview_pipeline = DiffusionPipeline.from_pretrained(
                 base_model,
                 custom_pipeline=custom_pipeline_path,
                 torch_dtype=mv_dtype,
-                use_safetensors=True,  # Forçar uso de safetensors quando disponível
+                use_safetensors=True,
             )
             logger.info("[MODEL] Zero123++ base carregado do HuggingFace com safetensors")
         except Exception as e:
-            load_errors.append(f"HuggingFace com safetensors: {e}")
-            logger.warning(
-                "Falha ao carregar Zero123++ com safetensors. Tentando sem safetensors: %s", e
-            )
+            load_errors.append(f"HuggingFace safetensors: {e}")
+            logger.warning("[MODEL] Falha ao carregar Zero123++ com safetensors: %s", e)
             try:
                 multiview_pipeline = DiffusionPipeline.from_pretrained(
                     base_model,
                     custom_pipeline=custom_pipeline_path,
                     torch_dtype=mv_dtype,
-                    use_safetensors=False,  # Fallback para pickle se safetensors não disponível
+                    use_safetensors=False,
                 )
                 logger.info("[MODEL] Zero123++ base carregado do HuggingFace sem safetensors (fallback)")
             except Exception as e2:
-                load_errors.append(f"HuggingFace sem safetensors: {e2}")
+                load_errors.append(f"HuggingFace fallback: {e2}")
                 logger.error(f"[MODEL] Falha ao carregar Zero123++: {e2}")
                 raise RuntimeError(f"Não foi possível carregar o modelo Zero123++. Erros: {load_errors}")
+
     multiview_pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
-        multiview_pipeline.scheduler.config, timestep_spacing="trailing"
+        multiview_pipeline.scheduler.config,
+        timestep_spacing="trailing",
     )
 
     logger.info("[MODEL] Carregando UNet customizado (FlexGen) para Zero123++")
@@ -1746,6 +1667,95 @@ def init_wrapper_from_config(
     log_memory_usage(logger, "Após carregar multiview model")
     _log_cuda_allocation(multiview_device, "load multiview model")
     logger.info("[MODEL] Multiview model carregado e movido para dispositivo")
+    return multiview_pipeline
+
+
+def init_wrapper_from_config(
+    config_path,
+    fast_mode=False,
+    disable_llm=False,
+    load_controlnet=True,
+    load_redux=True,
+    pipeline_mode: str = "flux",
+):
+    with open(config_path, "r") as config_file:
+        config_ = yaml.load(config_file, yaml.FullLoader)
+
+    pipeline_mode = (pipeline_mode or "flux").lower()
+    load_flux_branch = pipeline_mode in {"flux", "flux_only", "both", "all"}
+    load_multiview_branch = pipeline_mode in {"multiview", "mv", "both", "all"}
+    if not (load_flux_branch or load_multiview_branch):
+        logger.warning(
+            "[MODEL] pipeline_mode='%s' não reconhecido. Carregando apenas Flux por segurança.",
+            pipeline_mode,
+        )
+        pipeline_mode = "flux"
+        load_flux_branch = True
+        load_multiview_branch = False
+
+    if torch.cuda.is_available():
+        total_mem_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        if not fast_mode and total_mem_gb <= 12.5:
+            fast_mode = True
+            logger.warning(
+                "VRAM <= %.1fGB detectada. Fast mode habilitado automaticamente para evitar OOM.",
+                total_mem_gb,
+            )
+
+    if fast_mode:
+        flux_fast = config_["flux"].get("num_inference_steps_fast")
+        if flux_fast:
+            config_["flux"]["num_inference_steps"] = min(
+                config_["flux"].get("num_inference_steps", flux_fast),
+                flux_fast,
+            )
+        mv_fast = config_["multiview"].get("num_inference_steps_fast")
+        if mv_fast:
+            config_["multiview"]["num_inference_steps"] = min(
+                config_["multiview"].get("num_inference_steps", mv_fast),
+                mv_fast,
+            )
+        recon_fast = config_["reconstruction"].get("stage2_steps_fast")
+        if recon_fast:
+            config_["reconstruction"]["stage2_steps"] = max(10, recon_fast)
+        config_["caption"]["device"] = "cpu"
+        # Não forçar disable_llm no fast_mode - deixar o usuário decidir
+        # Se o usuário quiser desabilitar, pode passar --disable-llm explicitamente
+
+    # Verificar se fp8 está disponível no PyTorch
+    try:
+        _ = torch.float8_e4m3fn
+        fp8_available = True
+    except (AttributeError, TypeError):
+        fp8_available = False
+        logger.warning("[MODEL] fp8 não está disponível no PyTorch. Usando bfloat16 como fallback.")
+    
+    dtype_ = {
+        "fp8": torch.bfloat16 if not fp8_available else torch.float8_e4m3fn,  # Fallback para bfloat16 se fp8 não disponível
+        "bf16": torch.bfloat16,
+        "fp16": torch.float16,
+        "fp32": torch.float32,
+    }
+
+    flux_pipe = None
+    flux_redux_pipe = None
+    if load_flux_branch:
+        flux_pipe, flux_redux_pipe = _initialize_flux_branch(
+            config_,
+            dtype_,
+            fast_mode,
+            load_controlnet,
+            load_redux,
+        )
+    else:
+        logger.info("[MODEL] pipeline_mode=%s -> Flux branch não será carregado.", pipeline_mode)
+
+    multiview_pipeline = None
+    if load_multiview_branch:
+        multiview_pipeline = _initialize_multiview_branch(config_)
+    else:
+        logger.info("[MODEL] pipeline_mode=%s -> Zero123++ não será carregado.", pipeline_mode)
+
 
     logger.info("==> Loading caption model ...")
     log_memory_usage(logger, "Antes de carregar caption model")
@@ -1771,7 +1781,6 @@ def init_wrapper_from_config(
     recon_device = config_["reconstruction"].get("device", "cpu")
     logger.info(f"[MODEL] Carregando LRM: device={recon_device}")
     logger.info("[MODEL] [LRM] Passo 1/7: Carregando configuração do modelo...")
-    import sys
     sys.stdout.flush()
     recon_model_config = OmegaConf.load(config_["reconstruction"]["model_config"])
     logger.info("[MODEL] [LRM] Passo 2/7: Instanciando modelo a partir da configuração...")
