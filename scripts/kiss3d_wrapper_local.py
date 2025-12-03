@@ -1687,18 +1687,6 @@ def init_wrapper_from_config(
     with open(config_path, "r") as config_file:
         config_ = yaml.load(config_file, yaml.FullLoader)
 
-    pipeline_mode = (pipeline_mode or "flux").lower()
-    load_flux_branch = pipeline_mode in {"flux", "flux_only", "both", "all"}
-    load_multiview_branch = pipeline_mode in {"multiview", "mv", "both", "all"}
-    if not (load_flux_branch or load_multiview_branch):
-        logger.warning(
-            "[MODEL] pipeline_mode='%s' não reconhecido. Carregando apenas Flux por segurança.",
-            pipeline_mode,
-        )
-        pipeline_mode = "flux"
-        load_flux_branch = True
-        load_multiview_branch = False
-
     if torch.cuda.is_available():
         total_mem_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
         if not fast_mode and total_mem_gb <= 12.5:
@@ -1743,24 +1731,17 @@ def init_wrapper_from_config(
         "fp32": torch.float32,
     }
 
-    flux_pipe = None
-    flux_redux_pipe = None
-    if load_flux_branch:
-        flux_pipe, flux_redux_pipe = _initialize_flux_branch(
-            config_,
-            dtype_,
-            fast_mode,
-            load_controlnet,
-            load_redux,
-        )
-    else:
-        logger.info("[MODEL] pipeline_mode=%s -> Flux branch não será carregado.", pipeline_mode)
+    # SEMPRE carregar ambos os modelos (como no commit que funcionava)
+    # O offload adequado será feito depois
+    flux_pipe, flux_redux_pipe = _initialize_flux_branch(
+        config_,
+        dtype_,
+        fast_mode,
+        load_controlnet,
+        load_redux,
+    )
 
-    multiview_pipeline = None
-    if load_multiview_branch:
-        multiview_pipeline = _initialize_multiview_branch(config_)
-    else:
-        logger.info("[MODEL] pipeline_mode=%s -> Zero123++ não será carregado.", pipeline_mode)
+    multiview_pipeline = _initialize_multiview_branch(config_)
 
 
     logger.info("==> Loading caption model ...")
