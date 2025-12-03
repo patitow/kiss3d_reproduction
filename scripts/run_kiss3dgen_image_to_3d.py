@@ -18,6 +18,8 @@ import subprocess
 # Setup logging completo ANTES de qualquer outro import
 from setup_logging import setup_complete_logging
 
+pipeline_logger = logging.getLogger("kiss3dgen_pipeline")
+
 # Adicionar ninja ao PATH antes de qualquer import
 project_root = Path(__file__).parent.parent
 venv_path = project_root / "mesh3d-generator-py3.11"
@@ -342,55 +344,234 @@ def _run_dataset_plan(args) -> bool:
         print(f"[ERRO] Dataset plan {plan_path} não contém objetos.")
         return False
 
+    dataset_root = Path(args.dataset_root)
+    if not dataset_root.is_absolute():
+        dataset_root = project_root / dataset_root
+
     base_output = Path(args.output or "data/outputs/kiss3dgen_plan")
     if not base_output.is_absolute():
         base_output = project_root / base_output
     base_output.mkdir(parents=True, exist_ok=True)
 
+    if args.metrics_out:
+        print("[AVISO] '--metrics-out' será ignorado durante a execução do dataset plan; cada objeto salvará métricas localmente.")
+
+    config_path = _resolve_path(args.config)
+    print(f"[PLAN] Carregando modelos uma única vez a partir de {config_path} ...")
+    try:
+        k3d_wrapper = init_wrapper_from_config(
+            str(config_path),
+            fast_mode=args.fast_mode,
+            disable_llm=args.disable_llm,
+            load_controlnet=args.use_controlnet,
+            load_redux=args.enable_redux,
+        )
+    except Exception as exc:
+        print(f"[ERRO] Falha ao inicializar modelos para o dataset plan: {exc}")
+        return False
+
     success_all = True
-    script_file = Path(__file__).resolve()
 
     for idx, entry in enumerate(objects, 1):
         name = entry.get("name")
         if not name:
             print(f"[AVISO] Objeto #{idx} no dataset plan não possui campo 'name'. Ignorando.")
             continue
-        view = entry.get("view", 0)
+
+        entry_mode = entry.get("pipeline_mode") or args.pipeline_mode
+        if entry_mode not in {"flux", "multiview"}:
+            entry_mode = args.pipeline_mode
+
+        view_spec = entry.get("view", args.dataset_view if args.dataset_view is not None else 0)
+        if isinstance(view_spec, (list, tuple)):
+            view_arg = ",".join(str(v) for v in view_spec)
+        else:
+            view_arg = str(view_spec)
+
         custom_output = base_output / name
         custom_output.mkdir(parents=True, exist_ok=True)
+        views_root = custom_output / "views"
+        views_root.mkdir(parents=True, exist_ok=True)
 
-        cmd = [
-            sys.executable,
-            str(script_file),
-            "--dataset-item",
-            name,
-            "--dataset-view",
-            str(view),
-            "--output",
-            str(custom_output),
-            "--config",
-            args.config,
-            "--dataset-root",
-            args.dataset_root,
+        history_path = custom_output / "runs_report.json"
+        summary_path = custom_output / "summary.json"
+        log_file = custom_output / "plan_run.log"
+
+        print(f"\n[PLAN] ({idx}/{len(objects)}) Executando {name} (views {view_arg}) modo={entry_mode}...")
+        available_views = _collect_dataset_views(dataset_root, name)
+        if not available_views:
+            print(f"[ERRO] Nenhuma imagem encontrada para {name} em {dataset_root / 'images'}.")
+            success_all = False
+            continue
+
+        requested_views = _parse_view_argument(view_arg, available_views)
+        if not requested_views:
+            first_available = next(iter(available_views.keys()))
+            print(f"[AVISO] Vistas solicitadas não disponíveis ({view_arg}). Usando vista {first_available}.")
+            requested_views = [first_available]
+
+        selected_inputs = [
+            {
+                "label": f"view{view_id}",
+                "path": available_views[view_id],
+                "display": f"{name}_{view_id}",
+            }
+            for view_id in requested_views
         ]
 
-        if args.fast_mode:
-            cmd.append("--fast-mode")
-        if args.disable_llm:
-            cmd.append("--disable-llm")
-        gt_override = entry.get("gt_mesh") or args.gt_mesh
-        if gt_override:
-            cmd.extend(["--gt-mesh", gt_override])
+        gt_mesh_path = entry.get("gt_mesh") or args.gt_mesh
+        if gt_mesh_path:
+            gt_mesh_path = str(_resolve_path(gt_mesh_path))
+            if not Path(gt_mesh_path).exists():
+                print(f"[AVISO] GT mesh informada não encontrada ({gt_mesh_path}). Ignorando.")
+                gt_mesh_path = None
+        if not gt_mesh_path:
+            dataset_gt = dataset_root / "models" / name / "meshes" / "model.obj"
+            if dataset_gt.exists():
+                gt_mesh_path = str(dataset_gt.resolve())
 
-        if args.metrics_out:
-            metrics_out = custom_output / "metrics.json"
-            cmd.extend(["--metrics-out", str(metrics_out)])
+        history_path.write_text(json.dumps([], indent=2), encoding="utf-8")
+        history: List[Dict] = []
+        job_results: List[Dict] = []
+        plan_success = False
 
-        print(f"\n[PLAN] ({idx}/{len(objects)}) Executando {name} (view {view})...")
-        result = subprocess.run(cmd, cwd=str(project_root))
-        success = result.returncode == 0
-        print(f"[PLAN] Resultado {name}: {'SUCESSO' if success else 'FALHA'} (ret={result.returncode})")
-        success_all &= success
+        for view_idx, job in enumerate(selected_inputs, start=1):
+            print(f"\n[PLAN] -> Vista {job['label']} ({view_idx}/{len(selected_inputs)})")
+            # Não remover a pasta TMP para preservar todos os intermediários.
+            os.makedirs(TMP_DIR, exist_ok=True)
+
+            job_record = {
+                "label": job["label"],
+                "input": str(job["path"]),
+                "index": view_idx,
+                "success": False,
+                "error": None,
+                "metrics": None,
+                "pipeline_mode": entry_mode,
+            }
+
+            try:
+                gen_save_path, recon_mesh_path = run_image_to_3d(
+                    k3d_wrapper,
+                    str(job["path"]),
+                    enable_redux=args.enable_redux,
+                    use_mv_rgb=args.use_mv_rgb,
+                    use_controlnet=args.use_controlnet,
+                    pipeline_mode=entry_mode,
+                )
+                job_record["success"] = True
+                plan_success = True
+                print(f"[OK] Vista {job['label']} concluída.")
+            except Exception as exc:
+                job_record["error"] = str(exc)
+                history.append(job_record)
+                print(f"[ERRO] Falha na vista {job['label']}: {exc}")
+                pipeline_logger.error(f"[PLAN] Falha em {name} {job['label']}: {exc}")
+                success_all = False
+                continue
+
+            view_output_dir = views_root / job["label"]
+            view_output_dir.mkdir(parents=True, exist_ok=True)
+
+            bundle_copy = None
+            mesh_copy = view_output_dir / f"{job['display']}.glb"
+
+            if gen_save_path and os.path.exists(gen_save_path):
+                bundle_copy = view_output_dir / f"{job['display']}_3d_bundle.png"
+                shutil.copy2(gen_save_path, bundle_copy)
+            if recon_mesh_path and os.path.exists(recon_mesh_path):
+                shutil.copy2(recon_mesh_path, mesh_copy)
+            else:
+                mesh_copy = None
+
+            metrics = None
+            metrics_file = None
+            if gt_mesh_path and mesh_copy and os.path.exists(gt_mesh_path):
+                try:
+                    metrics = evaluate_mesh_against_gt(
+                        mesh_copy,
+                        gt_mesh_path,
+                        num_samples=args.gt_samples,
+                        normalize=not args.disable_metrics_normalization,
+                    )
+                    metrics_file = view_output_dir / f"{job['label']}_metrics.json"
+                    metrics_file.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+                    print(f"[OK] Métricas salvas em: {metrics_file}")
+                except Exception as exc:
+                    print(f"[AVISO] Falha ao calcular métricas da vista {job['label']}: {exc}")
+
+            job_results.append(
+                {
+                    "label": job["label"],
+                    "display": job["display"],
+                    "bundle": str(bundle_copy) if bundle_copy else None,
+                    "mesh": str(mesh_copy) if mesh_copy else None,
+                    "metrics": metrics,
+                    "metrics_file": str(metrics_file) if metrics_file else None,
+                    "order": view_idx,
+                    "pipeline_mode": entry_mode,
+                }
+            )
+            job_record["metrics"] = metrics
+            history.append(job_record)
+
+            try:
+                history_path.write_text(json.dumps(history, indent=2, default=str), encoding="utf-8")
+                pipeline_logger.debug(f"[PLAN] Histórico {name}: {len(history)} registros")
+            except Exception as exc:
+                pipeline_logger.error(f"[PLAN] Erro ao salvar histórico parcial ({name}): {exc}")
+
+        if not plan_success:
+            print(f"[PLAN] {name} não gerou resultados válidos. Veja {history_path}.")
+            continue
+
+        try:
+            history_path.write_text(json.dumps(history, indent=2, default=str), encoding="utf-8")
+        except Exception as exc:
+            print(f"[ERRO] Falha ao salvar histórico final de {name}: {exc}")
+
+        def _score(result: Dict) -> Tuple[float, int]:
+            if result["metrics"]:
+                return (result["metrics"]["chamfer_l1"], result["order"])
+            return (float("inf"), result["order"])
+
+        best_result = min(job_results, key=_score)
+        best_name = best_result["display"]
+        final_bundle = custom_output / f"{best_name}_3d_bundle.png"
+        final_mesh = custom_output / f"{best_name}.glb"
+
+        best_bundle_path = Path(best_result["bundle"]) if best_result["bundle"] else None
+        best_mesh_path = Path(best_result["mesh"]) if best_result["mesh"] else None
+        best_metrics_path = Path(best_result["metrics_file"]) if best_result["metrics_file"] else None
+
+        if best_bundle_path and best_bundle_path.exists():
+            shutil.copy2(best_bundle_path, final_bundle)
+            print(f"[PLAN] Bundle selecionado: {final_bundle}")
+        if best_mesh_path and best_mesh_path.exists():
+            shutil.copy2(best_mesh_path, final_mesh)
+            print(f"[PLAN] Mesh selecionada: {final_mesh}")
+
+        final_metrics_path = None
+        if best_metrics_path and best_metrics_path.exists():
+            target_metrics = custom_output / f"{best_name}_metrics.json"
+            shutil.copy2(best_metrics_path, target_metrics)
+            final_metrics_path = target_metrics
+            print(f"[PLAN] Métricas consolidadas: {final_metrics_path}")
+
+        summary = {
+            "dataset_item": name,
+            "pipeline_mode": entry_mode,
+            "best_view": best_result["label"],
+            "best_display": best_name,
+            "metrics": best_result["metrics"],
+            "all_runs": job_results,
+        }
+        summary_path.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
+
+        print(f"[PLAN] {name} concluído. Resultados em {custom_output}")
+        print(f"        Histórico: {history_path}")
+        print(f"        Resumo: {summary_path}")
+        print(f"        Logs: {log_file}")
 
     return success_all
 
@@ -438,6 +619,12 @@ def main():
         "--dataset-plan",
         type=str,
         help="Arquivo YAML descrevendo uma lista de objetos (name/view) para processar sequencialmente",
+    )
+    parser.add_argument(
+        "--pipeline-mode",
+        choices=["flux", "multiview"],
+        default="flux",
+        help="Escolhe entre reconstrução baseada em Flux (bundle) ou Zero123++ multiview",
     )
     parser.add_argument(
         "--disable-metrics-normalization",
@@ -547,6 +734,7 @@ def main():
     
     # Setup logging completo
     log_dir = Path(args.output) / "logs"
+    global pipeline_logger
     pipeline_logger, log_file = setup_complete_logging(
         log_dir=log_dir,
         log_level=logging.DEBUG,
@@ -673,8 +861,7 @@ def main():
 
     for idx, job in enumerate(selected_inputs, start=1):
         print(f"\n[3/4] Executando vista {job['label']} ({idx}/{len(selected_inputs)})...")
-        if os.path.exists(TMP_DIR):
-            shutil.rmtree(TMP_DIR)
+        # Preservar a pasta TMP entre execuções para manter todos os artefatos.
         os.makedirs(TMP_DIR, exist_ok=True)
 
         job_record = {
@@ -684,6 +871,7 @@ def main():
             "success": False,
             "error": None,
             "metrics": None,
+            "pipeline_mode": args.pipeline_mode,
         }
 
         try:
@@ -693,6 +881,7 @@ def main():
                 enable_redux=args.enable_redux,
                 use_mv_rgb=args.use_mv_rgb,
                 use_controlnet=args.use_controlnet,
+                pipeline_mode=args.pipeline_mode,
             )
             job_record["success"] = True
             print(f"[OK] Vista {job['label']} concluída.")
@@ -708,12 +897,16 @@ def main():
         view_output_dir = views_root / job["label"]
         view_output_dir.mkdir(parents=True, exist_ok=True)
 
-        bundle_copy = view_output_dir / f"{job['display']}_3d_bundle.png"
+        bundle_copy = None
         mesh_copy = view_output_dir / f"{job['display']}.glb"
-        if os.path.exists(gen_save_path):
+
+        if gen_save_path and os.path.exists(gen_save_path):
+            bundle_copy = view_output_dir / f"{job['display']}_3d_bundle.png"
             shutil.copy2(gen_save_path, bundle_copy)
-        if os.path.exists(recon_mesh_path):
+        if recon_mesh_path and os.path.exists(recon_mesh_path):
             shutil.copy2(recon_mesh_path, mesh_copy)
+        else:
+            mesh_copy = None
 
         metrics = None
         metrics_file = None
@@ -735,11 +928,12 @@ def main():
             {
                 "label": job["label"],
                 "display": job["display"],
-                "bundle": bundle_copy,
-                "mesh": mesh_copy,
+                "bundle": str(bundle_copy) if bundle_copy else None,
+                "mesh": str(mesh_copy) if mesh_copy else None,
                 "metrics": metrics,
-                "metrics_file": metrics_file,
+                "metrics_file": str(metrics_file) if metrics_file else None,
                 "order": idx,
+                "pipeline_mode": args.pipeline_mode,
             }
         )
         job_record["metrics"] = metrics
