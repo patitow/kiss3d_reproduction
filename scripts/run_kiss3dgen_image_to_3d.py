@@ -11,6 +11,8 @@ import json
 import logging
 from pathlib import Path
 from typing import Dict, List, Tuple
+import yaml
+import subprocess
 
 # Setup logging completo ANTES de qualquer outro import
 from setup_logging import setup_complete_logging, LoggingContext, log_model_operation, log_memory_usage
@@ -310,6 +312,89 @@ def _parse_view_argument(raw_value: str, available_views: Dict[int, Path]) -> Li
 
     return selected
 
+def _resolve_path(relative_path: str) -> Path:
+    path = Path(relative_path)
+    if not path.is_absolute():
+        path = project_root / path
+    return path.resolve()
+
+
+def _run_dataset_plan(args) -> bool:
+    plan_path = _resolve_path(args.dataset_plan)
+    if not plan_path.exists():
+        print(f"[ERRO] Arquivo de dataset plan não encontrado: {plan_path}")
+        return False
+
+    try:
+        plan_data = yaml.safe_load(plan_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print(f"[ERRO] Falha ao ler dataset plan {plan_path}: {exc}")
+        return False
+
+    if isinstance(plan_data, dict):
+        objects = plan_data.get("objects", [])
+    elif isinstance(plan_data, list):
+        objects = plan_data
+    else:
+        objects = []
+
+    if not objects:
+        print(f"[ERRO] Dataset plan {plan_path} não contém objetos.")
+        return False
+
+    base_output = Path(args.output or "data/outputs/kiss3dgen_plan")
+    if not base_output.is_absolute():
+        base_output = project_root / base_output
+    base_output.mkdir(parents=True, exist_ok=True)
+
+    success_all = True
+    script_file = Path(__file__).resolve()
+
+    for idx, entry in enumerate(objects, 1):
+        name = entry.get("name")
+        if not name:
+            print(f"[AVISO] Objeto #{idx} no dataset plan não possui campo 'name'. Ignorando.")
+            continue
+        view = entry.get("view", 0)
+        custom_output = base_output / name
+        custom_output.mkdir(parents=True, exist_ok=True)
+
+        cmd = [
+            sys.executable,
+            str(script_file),
+            "--dataset-item",
+            name,
+            "--dataset-view",
+            str(view),
+            "--output",
+            str(custom_output),
+            "--config",
+            args.config,
+            "--dataset-root",
+            args.dataset_root,
+        ]
+
+        if args.fast_mode:
+            cmd.append("--fast-mode")
+        if args.disable_llm:
+            cmd.append("--disable-llm")
+        gt_override = entry.get("gt_mesh") or args.gt_mesh
+        if gt_override:
+            cmd.extend(["--gt-mesh", gt_override])
+
+        if args.metrics_out:
+            metrics_out = custom_output / "metrics.json"
+            cmd.extend(["--metrics-out", str(metrics_out)])
+
+        print(f"\n[PLAN] ({idx}/{len(objects)}) Executando {name} (view {view})...")
+        result = subprocess.run(cmd, cwd=str(project_root))
+        success = result.returncode == 0
+        print(f"[PLAN] Resultado {name}: {'SUCESSO' if success else 'FALHA'} (ret={result.returncode})")
+        success_all &= success
+
+    return success_all
+
+
 def main():
     parser = argparse.ArgumentParser(description="Pipeline IMAGE TO 3D - Kiss3DGen")
     parser.add_argument("--input", type=str, help="Caminho para imagem de input")
@@ -350,6 +435,11 @@ def main():
         help="Arquivo JSON para salvar métricas de reconstrução (default: <output>/<input>_metrics.json)",
     )
     parser.add_argument(
+        "--dataset-plan",
+        type=str,
+        help="Arquivo YAML descrevendo uma lista de objetos (name/view) para processar sequencialmente",
+    )
+    parser.add_argument(
         "--disable-metrics-normalization",
         action="store_true",
         help="Não normaliza as malhas antes de calcular as métricas (por padrão normalizamos).",
@@ -358,6 +448,10 @@ def main():
     args = parser.parse_args()
     
     original_cwd = os.getcwd()
+
+    if args.dataset_plan:
+        success = _run_dataset_plan(args)
+        sys.exit(0 if success else 1)
 
     dataset_root = Path(args.dataset_root)
     if not dataset_root.is_absolute():

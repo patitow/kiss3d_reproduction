@@ -1511,6 +1511,70 @@ def init_wrapper_from_config(
     flux_pipe.load_lora_weights(flux_lora_pth)
     logger.info("[MODEL] LoRA carregado com sucesso")
 
+    def _apply_text_encoder_overrides(pipe, device_str, dtype_str):
+        if pipe is None or (not device_str and not dtype_str):
+            return
+
+        dtype_map = {
+            "fp32": torch.float32,
+            "float32": torch.float32,
+            "fp16": torch.float16,
+            "float16": torch.float16,
+            "bf16": torch.bfloat16,
+            "bfloat16": torch.bfloat16,
+        }
+
+        target_device = None
+        if device_str:
+            try:
+                target_device = torch.device(device_str)
+            except (TypeError, ValueError):
+                logger.warning("[MODEL] Dispositivo inválido para text_encoder: %s", device_str)
+
+        target_dtype = None
+        if dtype_str:
+            target_dtype = dtype_map.get(str(dtype_str).lower())
+            if target_dtype is None:
+                logger.warning("[MODEL] dtype inválido para text_encoder: %s", dtype_str)
+
+        modules = []
+        if getattr(pipe, "text_encoder", None) is not None:
+            modules.append(("text_encoder", pipe.text_encoder))
+        if getattr(pipe, "text_encoder_2", None) is not None:
+            modules.append(("text_encoder_2", pipe.text_encoder_2))
+
+        for name, module in modules:
+            kwargs = {}
+            if target_device is not None:
+                kwargs["device"] = target_device
+            if target_dtype is not None:
+                kwargs["dtype"] = target_dtype
+            if not kwargs:
+                continue
+            try:
+                module.to(**kwargs)
+                param_sample = None
+                try:
+                    param_sample = next(module.parameters())
+                except StopIteration:
+                    param_sample = None
+                resolved_device = target_device or (param_sample.device if param_sample is not None else "unknown")
+                resolved_dtype = target_dtype or (param_sample.dtype if param_sample is not None else "unknown")
+                logger.info(
+                    "[MODEL] %s movido para device=%s dtype=%s",
+                    name,
+                    resolved_device,
+                    resolved_dtype,
+                )
+            except RuntimeError as exc:
+                logger.warning("[MODEL] Falha ao mover %s para %s/%s: %s", name, target_device, target_dtype, exc)
+
+    _apply_text_encoder_overrides(
+        flux_pipe,
+        config_["flux"].get("text_encoder_device"),
+        config_["flux"].get("text_encoder_dtype"),
+    )
+
     def _apply_memory_optimizations(pipe):
         if hasattr(pipe, "enable_attention_slicing"):
             pipe.enable_attention_slicing("max")

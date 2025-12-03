@@ -1,7 +1,10 @@
 # Script para rodar e monitorar o teste dos 10 objetos
 $ErrorActionPreference = "Continue"
 
-$projectRoot = "D:\.Faculdade\Visao_Computacional\2025_2"
+if (-not $PSScriptRoot) {
+    $PSScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+}
+$projectRoot = Split-Path -Parent $PSScriptRoot
 $pythonExe = Join-Path $projectRoot "mesh3d-generator-py3.11\Scripts\python.exe"
 $scriptPath = Join-Path $projectRoot "scripts\run_kiss3dgen_image_to_3d.py"
 $outputDir = Join-Path $projectRoot "outputs\flux_top10_test"

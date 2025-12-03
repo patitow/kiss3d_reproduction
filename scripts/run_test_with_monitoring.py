@@ -105,6 +105,8 @@ def run_test():
     last_progress = None
     error_count = 0
     max_errors = 5
+    progress_interval = 30
+    last_progress_report = time.monotonic()
     
     try:
         while True:
@@ -128,17 +130,21 @@ def run_test():
             if process.poll() is not None:
                 break
             
-            # Verificar progresso a cada 30 segundos
+            # Verificar progresso em intervalos regulares
             time.sleep(1)
-            if int(time.time()) % 30 == 0:
+            now = time.monotonic()
+            if now - last_progress_report >= progress_interval:
                 progress = check_progress()
+                last_progress_report = now
                 if progress != last_progress:
-                    print(f"\n[PROGRESSO] Objetos: {progress['obj_files']} OBJ, {progress['glb_files']} GLB, "
-                          f"{progress['bundle_files']} Bundles | "
-                          f"Sucesso: {progress['successful']}/{progress['total']} | "
-                          f"Falhas: {progress['failed']}")
+                    print(
+                        f"\n[PROGRESSO] Objetos: {progress['obj_files']} OBJ, {progress['glb_files']} GLB, "
+                        f"{progress['bundle_files']} Bundles | "
+                        f"Sucesso: {progress['successful']}/{progress['total']} | "
+                        f"Falhas: {progress['failed']}"
+                    )
                     last_progress = progress
-                    
+
                     # Se completou todos os 10 objetos, podemos terminar
                     if progress['successful'] >= 10:
                         print("\n[SUCESSO] Todos os 10 objetos foram processados com sucesso!")

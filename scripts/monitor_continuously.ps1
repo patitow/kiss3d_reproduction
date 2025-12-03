@@ -1,5 +1,8 @@
 # Script de monitoramento contínuo
-$projectRoot = "D:\.Faculdade\Visao_Computacional\2025_2"
+if (-not $PSScriptRoot) {
+    $PSScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+}
+$projectRoot = Split-Path -Parent $PSScriptRoot
 $outputDir = Join-Path $projectRoot "outputs\flux_top10_test"
 $historyFile = Join-Path $outputDir "runs_report.json"
 $logDir = Join-Path $outputDir "logs"
