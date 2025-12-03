@@ -693,6 +693,11 @@ def main():
         help="Escolhe entre reconstrução baseada em Flux (bundle) ou Zero123++ multiview",
     )
     parser.add_argument(
+        "--precompile-nvdiffrast",
+        action="store_true",
+        help="Pré-compila o nvdiffrast antes de executar o pipeline (recomendado na primeira execução)",
+    )
+    parser.add_argument(
         "--disable-metrics-normalization",
         action="store_true",
         help="Não normaliza as malhas antes de calcular as métricas (por padrão normalizamos).",
@@ -851,6 +856,28 @@ def main():
         print("[OK] Token HuggingFace carregado.")
     else:
         print("[AVISO] Token HuggingFace nao configurado; repositorios privados podem falhar.")
+    
+    # Pré-compilar nvdiffrast se solicitado
+    if args.precompile_nvdiffrast:
+        print("\n[0.5/4] Pré-compilando nvdiffrast...")
+        try:
+            precompile_script = project_root / "scripts" / "precompile_nvdiffrast.py"
+            if precompile_script.exists():
+                result = subprocess.run(
+                    [sys.executable, str(precompile_script)],
+                    cwd=str(project_root),
+                    check=False,
+                )
+                if result.returncode != 0:
+                    print("[AVISO] Pré-compilação falhou ou foi cancelada.")
+                    print("[INFO] O pipeline tentará compilar durante a execução se necessário.")
+                else:
+                    print("[OK] Pré-compilação concluída com sucesso!")
+            else:
+                print(f"[AVISO] Script de pré-compilação não encontrado: {precompile_script}")
+        except Exception as e:
+            print(f"[AVISO] Erro ao executar pré-compilação: {e}")
+            print("[INFO] O pipeline tentará compilar durante a execução se necessário.")
 
     if args.fast_mode:
         os.environ["KISS3D_FAST_MODE"] = "1"
@@ -882,6 +909,7 @@ def main():
             disable_llm=args.disable_llm,
             load_controlnet=args.use_controlnet,
             load_redux=args.enable_redux,
+            pipeline_mode=args.pipeline_mode,  # CORRIGIDO: passar pipeline_mode
         )
         if k3d_wrapper.fast_mode and not args.fast_mode:
             print("[INFO] Fast mode ativado automaticamente (GPU <= 12GB detectada).")

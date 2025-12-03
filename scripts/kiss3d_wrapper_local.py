@@ -547,6 +547,12 @@ class kiss3d_wrapper(object):
         log_memory_usage(logger, "Após descarregar pipelines Flux")
 
     def generate_multiview(self, image, seed=None, num_inference_steps=None):
+        if self.multiview_pipeline is None:
+            raise RuntimeError(
+                "multiview_pipeline é None! O pipeline Zero123++ não foi carregado. "
+                "Certifique-se de que pipeline_mode='multiview' foi passado para init_wrapper_from_config."
+            )
+        
         seed = seed or self.config["multiview"].get("seed", 0)
         mv_device = self.config["multiview"].get("device", "cpu")
 
