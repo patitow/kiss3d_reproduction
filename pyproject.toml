@@ -1,0 +1,16 @@
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+exclude = [
+    ".git",
+    "data",
+    "logs",
+    "outputs",
+    "models",
+    "mesh3d-generator-py3.11",
+    "temp_pytorch3d",
+    "third_party",
+    "Kiss3DGen/models/ISOMER",
+]
+
+

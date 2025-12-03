@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# ruff: noqa: E402
 """
 Pipeline IMAGE TO 3D baseado no Kiss3DGen
 Reproduz exatamente o pipeline do artigo Kiss3DGen
@@ -15,7 +16,7 @@ import yaml
 import subprocess
 
 # Setup logging completo ANTES de qualquer outro import
-from setup_logging import setup_complete_logging, LoggingContext, log_model_operation, log_memory_usage
+from setup_logging import setup_complete_logging
 
 # Adicionar ninja ao PATH antes de qualquer import
 project_root = Path(__file__).parent.parent
@@ -33,7 +34,7 @@ try:
     site_packages = site.getsitepackages()[0] if site.getsitepackages() else None
     if site_packages:
         possible_ninja_paths.append(Path(site_packages) / "ninja" / "data" / "bin")
-except:
+except Exception:
     pass
 
 ninja_found = False
@@ -218,12 +219,12 @@ if vs_found:
                                 os.environ["PATH"] = value + os.pathsep + current_path
                         elif key in ["INCLUDE", "LIB", "LIBPATH"]:
                             os.environ[key] = value
-                print(f"[INFO] VS 2019 ambiente configurado via vcvarsall.bat")
+                print("[INFO] VS 2019 ambiente configurado via vcvarsall.bat")
         except Exception as e:
             print(f"[AVISO] Não foi possível executar vcvarsall.bat: {e}")
-            print(f"[INFO] Continuando com configuração manual do PATH")
+            print("[INFO] Continuando com configuração manual do PATH")
     
-    print(f"[OK] VS 2019 configurado corretamente")
+    print("[OK] VS 2019 configurado corretamente")
 else:
     print("[ERRO] VS 2019 não encontrado! Compilação vai falhar.")
     print("[INFO] Instale Visual Studio 2019 Build Tools:")
@@ -245,7 +246,7 @@ else:
 kiss3dgen_path = project_root / "Kiss3DGen"
 if not kiss3dgen_path.exists():
     print(f"[ERRO] Kiss3DGen nao encontrado em: {kiss3dgen_path}")
-    print(f"[INFO] Certifique-se de que o diretorio Kiss3DGen existe")
+    print("[INFO] Certifique-se de que o diretorio Kiss3DGen existe")
     sys.exit(1)
 
 sys.path.insert(0, str(project_root))
@@ -255,7 +256,6 @@ import shutil
 
 from kiss3d_utils_local import (
     TMP_DIR,
-    OUT_DIR,
     ORIGINAL_WORKDIR,
     ensure_hf_token,
     evaluate_mesh_against_gt,
@@ -447,8 +447,6 @@ def main():
     
     args = parser.parse_args()
     
-    original_cwd = os.getcwd()
-
     if args.dataset_plan:
         success = _run_dataset_plan(args)
         sys.exit(0 if success else 1)
@@ -612,12 +610,12 @@ def main():
     # Verificar se config existe (agora relativo ao diretorio Kiss3DGen onde estamos)
     if not os.path.exists(args.config):
         print(f"[ERRO] Config nao encontrado: {args.config}")
-        print(f"[INFO] Tentando usar config padrao do Kiss3DGen")
+        print("[INFO] Tentando usar config padrao do Kiss3DGen")
         default_config = Path('pipeline/pipeline_config/default.yaml')
         if default_config.exists():
             args.config = 'pipeline/pipeline_config/default.yaml'
         else:
-            print(f"[ERRO] Config padrao tambem nao encontrado!")
+            print("[ERRO] Config padrao tambem nao encontrado!")
             return
     
     # Inicializar wrapper do Kiss3DGen
@@ -654,7 +652,7 @@ def main():
         try:
             history_path.write_text(json.dumps([error_record], indent=2, default=str), encoding="utf-8")
             print(f"[INFO] Erro salvo em: {history_path}")
-        except:
+        except Exception:
             pass
         return
     

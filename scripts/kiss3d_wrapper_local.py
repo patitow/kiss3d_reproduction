@@ -6,21 +6,10 @@ import torch
 import yaml
 import uuid
 import warnings
-from typing import Union, Any, Dict
+from typing import Union, Any, Dict, TYPE_CHECKING
 from einops import rearrange
 from PIL import Image
-import time
 import torch.nn.functional as F
-
-# Suprimir warnings comuns e não críticos
-warnings.filterwarnings('ignore', message='.*Some weights of.*were not used.*')
-warnings.filterwarnings('ignore', message='.*text_projection.*')
-warnings.filterwarnings('ignore', message='.*add_prefix_space.*')
-warnings.filterwarnings('ignore', message='.*The tokenizer.*needs to be converted.*')
-warnings.filterwarnings('ignore', message='.*TRANSFORMERS_CACHE.*')
-warnings.filterwarnings('ignore', message='.*pkg_resources is deprecated.*')
-warnings.filterwarnings('ignore', message='.*_get_vc_env is private.*')
-
 import torchvision
 from torchvision.transforms import functional as TF
 from transformers import (
@@ -33,9 +22,8 @@ from transformers import (
     T5TokenizerFast,
 )
 from models.llm.llm import load_llm_model, get_llm_response
-
-from diffusers import FluxPipeline, DiffusionPipeline, EulerAncestralDiscreteScheduler, FluxTransformer2DModel
-from diffusers.models.controlnets.controlnet_flux import FluxMultiControlNetModel, FluxControlNetModel
+from diffusers import FluxPipeline, DiffusionPipeline, EulerAncestralDiscreteScheduler
+from diffusers.models.controlnets.controlnet_flux import FluxControlNetModel
 from diffusers.schedulers import FlowMatchHeunDiscreteScheduler
 
 try:
@@ -82,9 +70,18 @@ CUSTOM_PIPELINE_DIR = KISS3D_ROOT / "pipeline" / "custom_pipelines"
 if str(CUSTOM_PIPELINE_DIR) not in sys.path:
     sys.path.insert(0, str(CUSTOM_PIPELINE_DIR))
 
-from pipeline_flux_prior_redux import FluxPriorReduxPipeline
-from pipeline_flux_controlnet_image_to_image import FluxControlNetImg2ImgPipeline
-from pipeline_flux_img2img import FluxImg2ImgPipeline
+if TYPE_CHECKING:
+    from pipeline_flux_prior_redux import FluxPriorReduxPipeline
+    from pipeline_flux_controlnet_image_to_image import FluxControlNetImg2ImgPipeline
+
+# Suprimir warnings comuns e não críticos
+warnings.filterwarnings('ignore', message='.*Some weights of.*were not used.*')
+warnings.filterwarnings('ignore', message='.*text_projection.*')
+warnings.filterwarnings('ignore', message='.*add_prefix_space.*')
+warnings.filterwarnings('ignore', message='.*The tokenizer.*needs to be converted.*')
+warnings.filterwarnings('ignore', message='.*TRANSFORMERS_CACHE.*')
+warnings.filterwarnings('ignore', message='.*pkg_resources is deprecated.*')
+warnings.filterwarnings('ignore', message='.*_get_vc_env is private.*')
 
 
 def convert_flux_pipeline(exist_flux_pipe, target_pipe, **kwargs):
@@ -141,8 +138,8 @@ class kiss3d_wrapper(object):
     def __init__(
         self,
         config: Dict,
-        flux_pipeline: Union[FluxPipeline, FluxControlNetImg2ImgPipeline],
-        flux_redux_pipeline: FluxPriorReduxPipeline,
+        flux_pipeline: Union[FluxPipeline, "FluxControlNetImg2ImgPipeline"],
+        flux_redux_pipeline: "FluxPriorReduxPipeline",
         multiview_pipeline: DiffusionPipeline,
         caption_processor: AutoProcessor,
         caption_model: AutoModelForCausalLM,
@@ -549,7 +546,6 @@ class kiss3d_wrapper(object):
     def generate_multiview(self, image, seed=None, num_inference_steps=None):
         seed = seed or self.config["multiview"].get("seed", 0)
         mv_device = self.config["multiview"].get("device", "cpu")
-        gen_device = mv_device if isinstance(mv_device, str) and mv_device.startswith("cuda") else "cpu"
 
         # Garantir que o pipeline está completamente no device correto
         logger.info(f"[MULTIVIEW] Garantindo que pipeline está em {mv_device}")
@@ -1290,6 +1286,10 @@ def init_wrapper_from_config(
     load_controlnet=True,
     load_redux=True,
 ):
+    from pipeline_flux_prior_redux import FluxPriorReduxPipeline
+    from pipeline_flux_controlnet_image_to_image import FluxControlNetImg2ImgPipeline
+    from pipeline_flux_img2img import FluxImg2ImgPipeline
+
     with open(config_path, "r") as config_file:
         config_ = yaml.load(config_file, yaml.FullLoader)
 
@@ -1407,7 +1407,7 @@ def init_wrapper_from_config(
                 
                 if not found:
                     logger.error(f"[MODEL] Arquivo do modelo não encontrado: {original_path}")
-                    logger.error(f"[MODEL] Caminhos tentados:")
+                    logger.error("[MODEL] Caminhos tentados:")
                     for cp in candidate_paths:
                         logger.error(f"  - {cp}")
                     raise FileNotFoundError(f"Arquivo do modelo não encontrado: {original_path}")
@@ -1420,7 +1420,7 @@ def init_wrapper_from_config(
             # Mesmo que o modelo seja fp8 quantizado, carregamos como bfloat16
             if flux_dtype == "fp8":
                 load_dtype = torch.bfloat16
-                logger.info(f"[MODEL] Modelo fp8 quantizado será carregado como bfloat16 (fp8 não suportado nativamente)")
+                logger.info("[MODEL] Modelo fp8 quantizado será carregado como bfloat16 (fp8 não suportado nativamente)")
             else:
                 load_dtype = dtype_[flux_dtype]
             logger.info(f"[MODEL] Carregando modelo FLUX de arquivo safetensors com dtype: {load_dtype}")
@@ -1448,7 +1448,7 @@ def init_wrapper_from_config(
         log_memory_usage(logger, "Antes de carregar Flux base")
         # Se for URL, tentar baixar primeiro
         if flux_base_model_pth and flux_base_model_pth.startswith("http"):
-            logger.info(f"[MODEL] Detectada URL do modelo, tentando baixar...")
+            logger.info("[MODEL] Detectada URL do modelo, tentando baixar...")
             flux_pipe = _load_flux_pipeline(flux_base_model_pth)
         # Validar se o caminho do modelo fp8 existe antes de tentar carregar
         elif flux_base_model_pth and flux_base_model_pth.endswith("safetensors"):

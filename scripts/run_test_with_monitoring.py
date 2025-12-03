@@ -5,11 +5,9 @@ corrigindo problemas automaticamente.
 """
 import subprocess
 import time
-import os
 import sys
 from pathlib import Path
 import json
-import shutil
 
 project_root = Path(__file__).parent.parent
 python_exe = project_root / "mesh3d-generator-py3.11" / "Scripts" / "python.exe"
@@ -34,7 +32,7 @@ def check_progress():
     if history_file.exists():
         try:
             history = json.loads(history_file.read_text())
-        except:
+        except Exception:
             pass
     
     successful = sum(1 for item in history if item.get("success", False))
@@ -65,7 +63,7 @@ def check_errors():
                 error_lines = [line for line in lines[-50:] if any(kw in line.lower() for kw in ["error", "exception", "traceback"])]
                 if error_lines:
                     errors.extend(error_lines[-10:])  # Últimas 10 linhas de erro
-        except Exception as e:
+        except Exception:
             pass
     
     return errors[-20:]  # Retornar últimos 20 erros
