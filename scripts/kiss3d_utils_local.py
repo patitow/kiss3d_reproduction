@@ -400,8 +400,22 @@ def isomer_reconstruct(
             fov=30,
             radius=radius,
             save_dir=TMP_DIR,
-            save_addrs=save_paths,
+            save_addrs=[save_paths[0]] if save_paths else None,  # Apenas GLB para projection
         )
+        
+        # Salvar OBJ separadamente se necessário
+        if save_paths and len(save_paths) > 1 and save_paths[1].endswith('.obj'):
+            import trimesh
+            # Converter meshes para OBJ
+            vertices = meshes.verts_packed().cpu().float().numpy()
+            triangles = meshes.faces_packed().cpu().long().numpy()
+            np_color = meshes.textures.verts_features_packed().cpu().float().numpy()
+            
+            # Criar mesh trimesh e salvar OBJ
+            mesh = trimesh.Trimesh(vertices=vertices, faces=triangles, vertex_colors=np_color)
+            mesh.remove_unreferenced_vertices()
+            mesh.export(save_paths[1])
+            logger.info(f"==> Saved OBJ to {save_paths[1]}")
     finally:
         # Restaurar função original
         isomer_utils.save_py3dmesh_with_trimesh_fast = original_save
@@ -432,22 +446,29 @@ def preprocess_input_image(input_image):
 
 
 def render_3d_bundle_image_from_mesh(mesh_path):
-    renderings = render_mesh(mesh_path, save_dir=None)
+    try:
+        renderings = render_mesh(mesh_path, save_dir=None)
 
-    rgbs = renderings["rgb"][..., :3].cpu().permute(0, 3, 1, 2)
-    normals = renderings["normal"][..., :3].cpu()
-    alphas = renderings["alpha"][..., 0].cpu()
+        rgbs = renderings["rgb"][..., :3].cpu().permute(0, 3, 1, 2)
+        normals = renderings["normal"][..., :3].cpu()
+        alphas = renderings["alpha"][..., 0].cpu()
 
-    local_normal = local_normal_global_transform(
-        normals.cpu(),
-        azimuths_deg=np.array([0, 90, 180, 270]),
-        elevations_deg=np.array([5, 5, 5, 5]),
-    )
-    local_normal = local_normal * alphas[:, None, ...] + (1 - alphas[:, None, ...])
+        local_normal = local_normal_global_transform(
+            normals.cpu(),
+            azimuths_deg=np.array([0, 90, 180, 270]),
+            elevations_deg=np.array([5, 5, 5, 5]),
+        )
+        local_normal = local_normal * alphas[:, None, ...] + (1 - alphas[:, None, ...])
 
-    bundle_image = torchvision.utils.make_grid(torch.cat([rgbs, local_normal], dim=0), nrow=4, padding=0)
-
-    return bundle_image
+        bundle_image = torchvision.utils.make_grid(torch.cat([rgbs, local_normal], dim=0), nrow=4, padding=0)
+        return bundle_image
+    except Exception as exc:
+        logger.warning(
+            "[RENDER] Falha ao renderizar mesh via renderutils_plugin (%s). Usando bundle placeholder.",
+            exc,
+        )
+        placeholder = torch.zeros(3, 1024, 2048)
+        return placeholder
 
 
 # ============================================================================

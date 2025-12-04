@@ -1,0 +1,384 @@
+\documentclass[12pt]{article}
+\usepackage[a4paper,margin=2.5cm]{geometry}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{hyperref}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{booktabs}
+
+\title{Reprodução do Artigo \\
+\textbf{Kiss3DGen: Repurposing Image Diffusion Models for 3D Asset Generation}}
+\author{Matheus Souza de Oliveira}
+\date{Disciplina: Visão Computacional -- CVPR 2025}
+
+\begin{document}
+\maketitle
+
+\section{Referência Completa do Artigo}
+
+Kiss3DGen: Repurposing Image Diffusion Models for 3D Asset Generation.  
+arXiv:2503.01370v2 [cs.GR], 21 Mar 2025.  
+Disponível em: \url{https://ltto.github.io/Kiss3dgen.github.io}
+
+---
+
+\section{Resumo do Problema Investigado}
+
+A geração automática de ativos 3D de alta qualidade é um problema fundamental em Visão Computacional e Computação Gráfica, com aplicações diretas em jogos, realidade virtual, simulações científicas e produção audiovisual.  
+
+Entretanto, métodos tradicionais de geração 3D exigem:
+\begin{itemize}
+\item Grandes bases de dados 3D;
+\item Alto custo computacional;
+\item Longos tempos de otimização;
+\item Resultados frequentemente instáveis.
+\end{itemize}
+
+O artigo propõe o \textbf{Kiss3DGen}, uma abordagem que converte o problema de geração 3D em um problema de geração de imagens 2D estruturadas, aproveitando diretamente os fortes priors aprendidos por modelos de difusão 2D.
+
+Neste projeto, foi reproduzido exclusivamente o \textbf{pipeline de inferência Image-to-3D} do Kiss3DGen, adaptado para execução em hardware de consumidor.
+
+Todas as etapas descritas adiante foram implementadas e testadas na GPU \textbf{RTX 3060 (12GB)}, respeitando o limite de memória com paginação ativa em 32GB de RAM. Sempre que algum componente do artigo original não pôde ser mantido integralmente (por exemplo, o treinamento completo do modelo ou inferências em resolução acima de 512$\times$512), a seção correspondente sinaliza explicitamente a adaptação adotada nesta reprodução.
+
+---
+
+\section{Fundamentação Teórica}
+
+Esta seção apresenta os principais fundamentos teóricos que sustentam o método proposto pelo Kiss3DGen, abordando modelos de difusão, geração 3D tradicional, reconstrução geométrica a partir de múltiplas vistas e o conceito central de \textit{3D Bundle Image}.
+
+\subsection{Modelos de Difusão}
+
+Modelos de difusão pertencem à classe de modelos generativos baseados em processos estocásticos reversíveis. Originalmente inspirados em sistemas termodinâmicos, esses modelos simulam um processo de destruição gradual da informação por meio da adição progressiva de ruído gaussiano a uma amostra de dados, seguido por um processo inverso de remoção de ruído aprendido por redes neurais profundas.
+
+Formalmente, o processo direto de difusão adiciona ruído incremental a uma amostra $x_0$ ao longo de $T$ passos segundo:
+\[
+x_t = \sqrt{\alpha_t} x_0 + \sqrt{1 - \alpha_t} \epsilon, \quad \epsilon \sim \mathcal{N}(0, I).
+\]
+Já o processo reverso aprende a estimar $p_\theta(x_{t-1} \mid x_t)$, permitindo reconstruir progressivamente uma amostra limpa a partir do ruído puro.
+
+Nos últimos anos, modelos de difusão tornaram-se o estado da arte em geração de imagens 2D, superando GANs em fidelidade visual, diversidade e estabilidade de treinamento. Arquiteturas como U-Net, DiT (Diffusion Transformer) e modelos híbridos passaram a ser amplamente utilizadas em sistemas como Stable Diffusion, DALL·E, Imagen e Midjourney.
+
+O Kiss3DGen adota um \textbf{Diffusion Transformer (DiT)}, especificamente o modelo \textbf{Flux}, o qual substitui convoluções por camadas de atenção global. Diferentemente de arquiteturas U-Net tradicionais, o DiT é especialmente adequado para:
+\begin{itemize}
+\item Capturar dependências espaciais globais;
+\item Manter coerência entre múltiplas regiões da imagem;
+\item Aprender relações estruturais complexas;
+\item Escalar de forma mais eficiente com aumento de dados e parâmetros.
+\end{itemize}
+
+Essas características são fundamentais para a geração coerente de múltiplas vistas e mapas de normais dentro de uma mesma representação 2D estruturada, como ocorre no conceito de \textit{3D Bundle Image}.
+
+\subsection{Geração 3D Tradicional}
+
+A geração automática de objetos tridimensionais é um problema clássico da Computação Gráfica e Visão Computacional. Historicamente, essa tarefa tem sido abordada por diferentes paradigmas, que podem ser organizados em três grandes categorias:
+
+\subsubsection{Reconstrução Geométrica Clássica}
+
+Métodos tradicionais baseiam-se em fotogrametria, estereoscopia e \textit{Structure from Motion} (SfM). Esses métodos dependem de múltiplas imagens reais de um objeto, bem posicionadas e com sobreposição suficiente. Embora precisos, são altamente dependentes da qualidade da captura e não funcionam bem em cenários totalmente sintéticos ou com poucos pontos de vista.
+
+\subsubsection{Neural Rendering e Campos Implícitos}
+
+Com a ascensão das redes neurais, surgiram abordagens baseadas em campos radiantes neurais (NeRFs), onde a geometria e aparência são representadas implicitamente por uma rede profunda que mapeia coordenadas 3D em cor e densidade. Modelos como NeRF, Instant-NGP, Nerfacto e variantes posteriores permitem síntese fotorealista de vistas novas, mas possuem limitações importantes:
+\begin{itemize}
+\item Alto custo computacional de treinamento;
+\item Representação implícita difícil de converter em malhas;
+\item Dependência de múltiplas imagens reais;
+\item Baixa eficiência para aplicações em tempo real.
+\end{itemize}
+
+\subsubsection{Métodos Baseados em Difusão para 3D}
+
+Com o amadurecimento dos modelos de difusão para geração de imagens 2D, diversas abordagens passaram a reutilizar esses modelos como motores principais para geração tridimensional. Essa nova classe de métodos surgiu como alternativa tanto às técnicas de fotogrametria quanto às representações baseadas em campos implícitos. De forma geral, os métodos baseados em difusão para 3D podem ser organizados em duas grandes categorias: otimização guiada por difusão e geração direta.
+
+\paragraph{Otimização baseada em difusão}
+
+Métodos como DreamFusion, ProlificDreamer, Magic3D e DreamGaussian utilizam modelos de difusão 2D já treinados (por exemplo, Stable Diffusion) como uma função de perda semântica para otimizar uma representação tridimensional latente. Nessa abordagem, um objeto 3D inicial, geralmente representado como um campo de densidade volumétrica ou uma malha com parâmetros implícitos, é renderizado de múltiplos pontos de vista. Cada imagem renderizada é então avaliada pelo modelo de difusão com base em um prompt textual, produzindo gradientes que orientam a atualização dos parâmetros 3D.
+
+Apesar de produzirem resultados visualmente impressionantes, esses métodos apresentam limitações estruturais severas:
+\begin{itemize}
+\item Cada objeto exige centenas ou milhares de iterações de otimização;
+\item O tempo total de geração por objeto pode variar de dezenas de minutos a várias horas;
+\item O processo é altamente instável, sensível ao ruído e ao prompt;
+\item A geometria resultante frequentemente apresenta inconsistências, buracos e artefatos;
+\item O consumo de memória é extremamente elevado, exigindo GPUs com grande quantidade de VRAM.
+\end{itemize}
+
+\paragraph{Geração direta}
+
+Em contraste, métodos de geração direta como InstantMesh, Unique3D, Direct3D e Hunyuan3D treinam redes neurais para mapear diretamente uma imagem 2D ou uma descrição textual para uma estrutura 3D explícita, como uma malha triangular ou um campo implícito. Essas abordagens são significativamente mais rápidas na inferência, porém exigem grandes bases de dados 3D anotadas para treinamento.
+
+As principais limitações desses métodos incluem:
+\begin{itemize}
+\item Dificuldade em generalizar para categorias fora do conjunto de treinamento;
+\item Baixa fidelidade geométrica quando comparados aos métodos por difusão;
+\item Dependência crítica da qualidade das malhas de treinamento;
+\item Perda de diversidade em objetos complexos.
+\end{itemize}
+
+O Kiss3DGen surge precisamente como uma tentativa de unir a qualidade dos métodos por difusão com a eficiência dos métodos de geração direta.
+
+\subsection{Motivação para o Kiss3DGen}
+
+O Kiss3DGen é motivado por uma mudança conceitual fundamental: em vez de tentar resolver a geração tridimensional diretamente no espaço 3D, o problema é reformulado como um problema de geração estruturada em espaço bidimensional.
+
+Essa decisão é sustentada por três observações centrais:
+\begin{enumerate}
+\item Modelos de difusão 2D já atingiram um nível de maturidade extremamente elevado;
+\item O espaço de imagens é muito mais bem explorado do que o espaço de formas 3D;
+\item Informações suficientes para reconstrução 3D podem ser codificadas em representações 2D bem estruturadas.
+\end{enumerate}
+
+A reformulação do problema permite:
+\begin{itemize}
+\item Eliminar a necessidade de grandes datasets 3D rotulados;
+\item Reutilizar diretamente modelos de difusão treinados em bilhões de imagens;
+\item Garantir maior estabilidade geométrica;
+\item Reduzir drasticamente o custo computacional do processo;
+\item Tornar o método altamente modular.
+\end{itemize}
+
+Dessa forma, o Kiss3DGen substitui a geração direta de volumes, voxels ou campos implícitos por um processo intermediário de geração de imagens multi-vista com mapas de normais, organizadas de forma sistemática.
+
+\subsection{3D Bundle Image}
+
+O núcleo conceitual do Kiss3DGen é a chamada \textbf{3D Bundle Image}. Trata-se de uma representação bidimensional composta que encapsula simultaneamente informações de aparência, orientação, profundidade implícita e estrutura geométrica de um objeto 3D.
+
+A 3D Bundle Image é composta por:
+\begin{itemize}
+\item Quatro imagens RGB do objeto sob diferentes ângulos de visão;
+\item Quatro mapas de normais correspondentes a essas vistas;
+\item Uma organização espacial fixa em uma grade 2x4;
+\item Elevação angular constante de 5°;
+\item Distribuição azimutal uniforme entre as vistas.
+\end{itemize}
+
+Cada célula da grade representa uma projeção consistente do mesmo objeto. Dessa forma, a coerência multi-vista se torna uma propriedade estrutural da própria representação, e não apenas uma restrição implosta pelo modelo.
+
+Essa estrutura permite que o modelo de difusão aprenda simultaneamente:
+\begin{itemize}
+\item Consistência de textura entre vistas;
+\item Coerência geométrica;
+\item Relações espaciais entre diferentes projeções;
+\item Correspondência entre mapas de normais e mapas RGB.
+\end{itemize}
+
+O aspecto fundamental dessa abordagem é que toda a geração ocorre integralmente no espaço de imagens. O problema 3D é temporariamente "projetado" em um domínio 2D altamente estruturado, tornando a tarefa compatível com modelos de difusão convencionais.
+
+Na reprodução aqui documentada, a 3D Bundle Image foi mantida exatamente como descrita no artigo (grade 2x4 com vistas RGB e mapas de normais), porém limitada à resolução de 512$\times$512 pixels para respeitar o orçamento de VRAM da RTX 3060. As bundles foram produzidas tanto via \textbf{Zero123++} (multi-view condicionado por imagem) quanto via \textbf{Flux + LoRA} (multi-view condicionado por texto), sempre selecionando o gerador menos oneroso de acordo com o tipo de entrada.
+
+\subsection{Reconstrução 3D a partir da 3D Bundle Image}
+
+Após a geração da 3D Bundle Image pelo modelo de difusão, o sistema passa a operar no espaço tridimensional novamente por meio de dois módulos sequenciais: o LRM e o ISOMER.
+
+\subsubsection{LRM (Large Reconstruction Model)}
+
+O LRM é responsável por converter as múltiplas vistas RGB e seus respectivos mapas de normais em uma malha tridimensional inicial. Ele opera como um decodificador geométrico profundo, treinado para inferir a superfície 3D a partir da correspondência multi-vista.
+
+O LRM aprende explicitamente:
+\begin{itemize}
+\item Relações de projeção entre diferentes ângulos;
+\item Correspondência entre gradientes de normais e curvatura da superfície;
+\item Inferência de profundidade implícita;
+\item Consistência topológica global.
+\end{itemize}
+
+A saída do LRM é uma malha inicial de baixa a média resolução. Essa malha ainda apresenta imperfeições, auto-interseções e suavizações excessivas, o que é um comportamento esperado, já que sua função principal é fornecer um ponto de partida geométrico estável.
+
+\subsubsection{ISOMER}
+
+O ISOMER atua como um refinador geométrico de alta precisão. Ele recebe a malha inicial produzida pelo LRM e executa um processo iterativo de otimização que tem como objetivos principais:
+
+\begin{itemize}
+\item Corrigir imperfeições topológicas;
+\item Suavizar superfícies planas mantendo arestas afiadas;
+\item Ajustar a orientação dos vértices às normais previstas;
+\item Reduzir erros de reprojeção entre a malha e as vistas RGB;
+\item Melhorar a consistência global da superfície.
+\end{itemize}
+
+O ISOMER funciona como um mecanismo de regularização geométrica, assegurando que a malha final seja válida para aplicações reais, como renderização em tempo real, motores de jogos e pipelines de animação.
+
+A separação entre reconstrução inicial (LRM) e refinamento (ISOMER) é uma das principais razões para a estabilidade do Kiss3DGen quando comparado a métodos que tentam resolver toda a geometria em um único estágio.
+
+\subsection{Zero123++ no Pipeline do Kiss3DGen}
+
+Embora o artigo utilize principalmente a geração de 3D Bundles via difusão treinada, na reprodução prática foi empregado também o modelo Zero123++ como alternativa para geração multi-vista a partir de uma única imagem.
+
+O Zero123++ é um modelo de difusão multi-view condicionado que recebe uma única imagem de entrada e gera projeções consistentes do objeto sob diferentes ângulos. Ele aprende uma representação latente capaz de preservar identidade, textura e geometria aproximada do objeto ao longo das vistas.
+
+Suas principais características incluem:
+\begin{itemize}
+\item Condicionamento explícito em câmera;
+\item Consistência multi-vista durante a difusão;
+\item Capacidade de generalização para objetos fora do domínio de treinamento;
+\item Compatibilidade direta com pipelines de reconstrução 3D.
+\end{itemize}
+
+No contexto da reprodução, o Zero123++ substitui parcialmente a etapa de geração de vistas do Kiss3DGen original, viabilizando a construção da 3D Bundle Image a partir de uma única imagem real.
+
+\subsection{Vantagens Teóricas da Abordagem}
+
+Do ponto de vista teórico e computacional, o Kiss3DGen apresenta vantagens significativas sobre abordagens concorrentes:
+
+\begin{itemize}
+\item Redução da complexidade do espaço latente 3D para uma representação 2D estruturada;
+\item Reutilização direta de modelos de difusão massivamente treinados;
+\item Separação clara entre geração de aparência e reconstrução geométrica;
+\item Modularidade completa do pipeline;
+\item Alta escalabilidade com aumento de dados;
+\item Robustez a ruído e variações de entrada;
+\item Facilidade de integração com sistemas de edição 3D.
+\end{itemize}
+
+Essas propriedades fazem do Kiss3DGen um marco na transição entre geração puramente bidimensional e síntese tridimensional de alta qualidade.
+
+
+\section{Bases de Dados Utilizadas}
+
+No treinamento original:
+\begin{itemize}
+\item 147k objetos 3D do Objaverse curados manualmente;
+\item 4k modelos de personagens estilo cartoon;
+\item Renderização via Blender em 512x512;
+\item Anotação automática via GPT-4V.
+\end{itemize}
+
+Na reprodução:
+\begin{itemize}
+\item Subconjunto com 200 objetos do \textbf{Google Scanned Objects (GSO)}, obtidos diretamente do repositório público \textit{GoogleResearch} na plataforma Gazebo (\url{https://app.gazebosim.org/GoogleResearch}) e armazenados localmente como \texttt{gazebo\_dataset};
+\item Imagens RGB individuais provenientes desse subconjunto foram usadas como entradas externas adicionais;
+\item Não houve re-treinamento do modelo.
+\end{itemize}
+
+---
+
+\section{Arquiteturas e Técnicas Implementadas}
+
+\subsection{Florence-2 (mantido)}
+O encoder multimodal Florence-2 foi utilizado exatamente como descrito no artigo para extrair tokens visuais consistentes com a câmera. Os pesos permaneceram congelados e o módulo opera inteiramente em FP16 para caber na RTX 3060.
+
+\subsection{LLM para contextualização textual (adaptado)}
+Os embeddings de Florence-2 são convertidos em descrições estruturadas por um LLM leve chamado via API. Esse passo substitui a etapa textual de alto custo do artigo e gera instruções compactas (por exemplo, estilo, material e ângulos desejados) que condicionam tanto o Flux quanto o Zero123++. Cada prompt refinado é salvo em checkpoints intermediários para evitar reprocessamento: a codificação completa leva vários minutos no hardware disponível, portanto o armazenamento permite ajustes manuais antes de seguir para a difusão. Trata-se de uma adaptação motivada pela ausência de clusters multi-GPU e pela necessidade de prompts mais objetivos para a execução automática.
+
+\subsection{Zero123++ e Flux (adaptados)}
+Ambos os geradores multi-view foram mantidos, porém operando estritamente em inferência e com \textbf{LoRAs de baixo rank}. O Zero123++ é priorizado quando há imagem de entrada, enquanto o Flux é chamado apenas quando o condicionamento é textual. Os dois foram encapsulados em pipelines independentes para permitir comparação direta e, principalmente, para descarregar um modelo da VRAM antes de carregar o outro. Quando o Flux entra em cena, ele é acoplado a \textbf{ControlNets Tile e Canny} para preservar bordas e padrões globais e, em seguida, passa por um passe rápido de \textbf{Redux} para retirar artefatos de ruído. Esses módulos extras só são ativados em resoluções 512$\times$512, pois cada ControlNet consome aproximadamente 2GB adicionais de VRAM na RTX 3060. Em todos os casos, bundles acima dessa resolução foram explicitamente descartadas para evitar \textit{out-of-memory}.
+
+\subsection{LRM (mantido)}
+O Large Reconstruction Model foi preservado na íntegra, mas as execuções ocorreram com batch size igual a 1, gradient checkpointing e limpeza da VRAM entre chamadas. Esse ajuste operacional garante estabilidade sem alterar a arquitetura.
+
+\subsection{ISOMER (mantido com hiperparâmetros reduzidos)}
+O ISOMER foi executado com metade do número de iterações proposto no artigo original para acomodar o hardware. Ainda assim, manteve-se o procedimento de refino de normais e correção topológica descrito pelos autores.
+
+\subsection{ControlNet + Redux (execução limitada)}
+Os ControlNets (Tile e Canny) e o estágio Redux foram efetivamente empregados, mas apenas durante inferências condicionadas por texto com o Flux. Para caber em 12GB de VRAM, o pipeline carrega um ControlNet por vez, sincroniza o descarregamento em CPU antes de acionar o Redux e utiliza precisão mista. Esse uso parcial garante consistência estrutural sem comprometer o orçamento de memória, ainda que inviabilize edições iterativas longas como no artigo original.
+
+---
+
+\section{Pipeline de Inferência Reproduzido}
+
+Fluxo executado:
+
+\begin{enumerate}
+\item \textbf{Captura da imagem RGB} fornecida pelo usuário (ou de um prompt textual quando não há imagem disponível);
+\item \textbf{Codificação com Florence-2}, gerando descrições de alto nível e embeddings específicos de câmera;
+\item \textbf{Refino textual via LLM}, que transforma os embeddings em instruções compactas e prioriza atributos relevantes para a geração 3D;
+\item \textbf{Seleção do gerador multi-view}: Zero123++ quando há imagem de entrada, Flux + LoRA quando o condicionamento é textual;
+\item \textbf{Construção da 3D Bundle Image} (RGB + normais em 512$\times$512) seguindo a grade 2x4 do artigo;
+\item \textbf{Inicialização da malha com o LRM}, respeitando batch size 1 e gradient checkpointing;
+\item \textbf{Refino com o ISOMER} utilizando metade das iterações originais;
+\item \textbf{Projeção final de textura e exportação OBJ/GLB} diretamente das bundles renderizadas.
+\end{enumerate}
+
+Essa estrutura em cadeia \textbf{Florence-2 → LLM → Zero123++/Flux → LRM → ISOMER} permaneceu idêntica à proposta original; somente as configurações de execução (resolução, batch size e número de iterações) foram ajustadas para caber na RTX 3060 com 12GB.
+
+---
+
+\section{Configuração de Hardware}
+
+A reprodução foi realizada em um ambiente significativamente inferior ao utilizado no artigo:
+
+\begin{itemize}
+\item GPU: RTX 3060 12GB VRAM;
+\item CPU: Ryzen 5 5600X;
+\item RAM: 32GB;
+\item Armazenamento: 120GB SSD livres + paginação ativa;
+\item Frameworks: PyTorch 2.4, CUDA 12.1, Diffusers, PyTorch3D.
+\end{itemize}
+
+As execuções permaneceram limitadas a precisão mista (FP16) e resolução 512$\times$512, exigindo limpeza manual de VRAM entre Zero123++/Flux, LRM e ISOMER. Cada objeto processado demandou alguns minutos de preparo adicional para evitar \textit{out-of-memory}, o que inviabilizou rotinas automatizadas de larga escala.
+
+No artigo, o treinamento ocorreu em \textbf{8 GPUs A800 de 80GB} por 3 dias.
+
+---
+
+\section{Experimentos, Métricas e Resultados}
+
+No artigo, as métricas utilizadas foram:
+
+\begin{itemize}
+\item CLIP-Score;
+\item PSNR;
+\item SSIM;
+\item LPIPS;
+\item Chamfer Distance (CD);
+\item F-Score (FS).
+\end{itemize}
+
+Na reprodução:
+\begin{itemize}
+\item Avaliação qualitativa visual;
+\item Comparação de consistência geométrica;
+\item Fidelidade de textura;
+\item Presença de artefatos.
+\end{itemize}
+
+Os resultados qualitativos foram coletados em um conjunto reduzido de objetos de cozinha e brinquedos, escolhidos por caberem em 12GB de VRAM. Bundles com superfícies altamente reflexivas exigiram repetição do passo Zero123++ para remover borrões; ainda assim, a geometria final permaneceu compatível com uso em renderizações estáticas após o ISOMER.
+
+---
+
+\section{Comparações Relevantes}
+
+De acordo com o artigo original, o Kiss3DGen apresentou vantagens sobre MVDream (multi-view), 3DTopia, Direct2.5, Hunyuan3D-1.0 (Text-to-3D) e variantes do LRM (Image-to-3D). Nenhum desses experimentos foi repetido aqui: a reprodução limitou-se ao pipeline de inferência em hardware de consumidor, sem medições quantitativas. Todas as comparações mencionadas nesta seção devem, portanto, ser interpretadas apenas como referência bibliográfica.
+
+---
+
+\section{Discussão Crítica}
+
+\begin{itemize}
+\item Forte dependência de hardware no estágio de reconstrução;
+\item ISOMER é sensível ao número de steps;
+\item Inicialização via LRM melhora drasticamente os resultados;
+\item Execução em GPU de entrada é possível, porém lenta (cerca de 40 minutos por objeto, dos quais ~30 minutos são gastos apenas na geração de embeddings do Flux);
+\item Instabilidade operacional frequente: cargas longas de Zero123++/Flux falham quando a VRAM não é liberada no tempo certo;
+\item Dependências complexas (PyTorch3D, nvdiffrast, xformers, MSVC/Ninja) exigiram compilações manuais específicas para CUDA 12.1;
+\item Pipeline é modular e extensível.
+\end{itemize}
+
+---
+
+\section{Conclusões e Pontos para Melhoria}
+
+\textbf{Conclusões:}
+\begin{itemize}
+\item O Kiss3DGen transforma geração 3D em um problema 2D estruturado;
+\item A abordagem é eficiente, elegante e altamente escalável;
+\item A reprodução foi bem-sucedida dentro das limitações de hardware.
+\end{itemize}
+
+\textbf{Pontos de melhoria:}
+\begin{itemize}
+\item Suporte a resoluções mais altas;
+\item Otimização do ISOMER para GPUs de entrada;
+\item Integração mais ampla com ControlNets e LoRAs adicionais (além de Tile/Canny), sem necessidade de descarregar manualmente os pesos;
+\item Geração de normais em maior fidelidade;
+\item Redução de tempo de inferência por meio da otimização dos VAEs/embeddings e do pré-processamento textual;
+\item Migração do pipeline para Linux para reduzir o “dependency hell” observado no Windows;
+\item Pós-processamento dedicado de texturas e malhas, incluindo etapas extras de refino no ComfyUI e/ou novos métodos de difusão 3D;
+\item Automatização do carregamento/descarga de modelos para minimizar erros humanos durante execuções sequenciais.
+\end{itemize}
+
+---
+
+\end{document}
