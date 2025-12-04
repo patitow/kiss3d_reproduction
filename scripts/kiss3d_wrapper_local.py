@@ -6,12 +6,14 @@ import torch
 import yaml
 import uuid
 import warnings
-from typing import Union, Any, Dict, TYPE_CHECKING
+import shutil
+from typing import Union, Any, Dict, TYPE_CHECKING, List
 from einops import rearrange
 from PIL import Image
 import torch.nn.functional as F
 import torchvision
 from torchvision.transforms import functional as TF
+from torchvision.transforms import InterpolationMode
 from transformers import (
     AutoProcessor,
     AutoModelForCausalLM,
@@ -39,6 +41,11 @@ from huggingface_hub import hf_hub_download
 
 from omegaconf import OmegaConf
 from models.lrm.utils.train_util import instantiate_from_config
+
+try:
+    import trimesh
+except Exception:
+    trimesh = None
 
 from kiss3d_utils_local import (
     logger,
@@ -196,6 +203,36 @@ class kiss3d_wrapper(object):
     def renew_uuid(self):
         self.uuid = uuid.uuid4()
 
+    @staticmethod
+    def _finalize_lrm_outputs(lrm_obj_path: str, final_obj_path: str, final_glb_path: str, fallback_obj: str | None = None, fallback_glb: str | None = None):
+        os.makedirs(os.path.dirname(final_obj_path), exist_ok=True)
+        os.makedirs(os.path.dirname(final_glb_path), exist_ok=True)
+
+        if lrm_obj_path and os.path.exists(lrm_obj_path):
+            shutil.copy2(lrm_obj_path, final_obj_path)
+            logger.info(f"[RECON] OBJ principal atualizado a partir do LRM: {final_obj_path}")
+        elif fallback_obj and os.path.exists(fallback_obj):
+            shutil.copy2(fallback_obj, final_obj_path)
+            logger.warning(f"[RECON] LRM OBJ ausente, usando fallback ISOMER em {fallback_obj}")
+        else:
+            logger.error("[RECON] Nenhum OBJ disponível para promover")
+
+        glb_promoted = False
+        if os.path.exists(final_obj_path) and trimesh is not None:
+            try:
+                mesh = trimesh.load(final_obj_path, force='mesh', process=False)
+                mesh.export(final_glb_path)
+                glb_promoted = True
+                logger.info(f"[RECON] GLB convertido do OBJ principal: {final_glb_path}")
+            except Exception as exc:
+                logger.warning(f"[RECON] Falha ao converter OBJ -> GLB ({exc}); usando fallback")
+
+        if not glb_promoted and fallback_glb and os.path.exists(fallback_glb):
+            shutil.copy2(fallback_glb, final_glb_path)
+            logger.warning(f"[RECON] GLB principal usando fallback ISOMER em {fallback_glb}")
+        elif not glb_promoted and fallback_glb is None:
+            logger.error("[RECON] Nenhum GLB disponível para salvar")
+
     def context(self):
         if self.config["use_zero_gpu"]:
             pass
@@ -208,7 +245,8 @@ class kiss3d_wrapper(object):
         stage_name: str,
         similarity_threshold: float = 0.995,
         min_duplicate_pairs: int = 3,
-    ):
+        raise_on_fail: bool = True,
+    ) -> bool:
         """
         Detects nearly identical RGB views (top row of the bundle grid).
         If many views are almost identical, the downstream reconstruction
@@ -263,8 +301,12 @@ class kiss3d_wrapper(object):
                     f"com similaridade > {similarity_threshold:.3f} (std médio {pixel_std:.6f}). "
                     "Abandonando pipeline para evitar malha duplicada."
                 )
-                logger.error(message)
-                raise RuntimeError(message)
+                if raise_on_fail:
+                    logger.error(message)
+                    raise RuntimeError(message)
+                logger.warning(message + " Prosseguindo mediante tentativa de aleatorização.")
+                return True
+            return False
         except RuntimeError:
             raise
         except Exception as exc:  # best-effort detector; não bloquear pipeline em erro inesperado
@@ -273,6 +315,87 @@ class kiss3d_wrapper(object):
                 stage_name,
                 exc,
             )
+        return False
+
+    @staticmethod
+    def _fake_normals_from_view(view: torch.Tensor) -> torch.Tensor:
+        normals = view.clone()
+        min_vals = normals.amin(dim=(-2, -1), keepdim=True)
+        max_vals = normals.amax(dim=(-2, -1), keepdim=True)
+        denom = (max_vals - min_vals).clamp_min(1e-6)
+        normals = (normals - min_vals) / denom
+        normals = normals * 0.6 + 0.2
+        return normals
+
+    def _compose_seed_grid_from_views(
+        self,
+        variations: list[torch.Tensor],
+        view_h: int,
+        view_w: int,
+        flux_device: torch.device,
+    ) -> torch.Tensor:
+        dtype = variations[0].dtype if variations else torch.float32
+        seed_grid = torch.zeros(
+            (1, 3, self.flux_height, self.flux_width),
+            device=flux_device,
+            dtype=dtype,
+        )
+
+        for idx, view in enumerate(variations):
+            view_device = view.to(flux_device)
+            col = idx * view_w
+            seed_grid[:, :, :view_h, col : col + view_w] = view_device.unsqueeze(0)
+            normals = self._fake_normals_from_view(view_device)
+            seed_grid[:, :, view_h:, col : col + view_w] = normals.unsqueeze(0)
+
+        return seed_grid
+
+    def _generate_seed_variations(
+        self,
+        base: torch.Tensor,
+        attempt_idx: int,
+        noise_strength: float,
+    ) -> list[torch.Tensor]:
+        variations: list[torch.Tensor] = []
+        device = base.device
+        hue_delta = 0.08 + 0.02 * attempt_idx
+        sat_scale = 1.15 + 0.05 * attempt_idx
+        for idx in range(4):
+            view = base.clone()
+            if idx == 1:
+                view = TF.hflip(view)
+            elif idx == 2:
+                view = TF.adjust_hue(view, hue_delta)
+            elif idx == 3:
+                view = TF.adjust_saturation(view, sat_scale)
+
+            if attempt_idx > 0:
+                angle = float((torch.rand(1, device=device).item() - 0.5) * 6.0 * attempt_idx)
+                max_shift = max(1, int(2 * attempt_idx))
+                dx = int((torch.rand(1, device=device).item() - 0.5) * max_shift)
+                dy = int((torch.rand(1, device=device).item() - 0.5) * max_shift)
+                view = TF.affine(
+                    view,
+                    angle=angle,
+                    translate=[dx, dy],
+                    scale=1.0,
+                    shear=[0.0, 0.0],
+                    interpolation=InterpolationMode.BILINEAR,
+                    fill=0.0,
+                )
+                contrast = 1.0 + (torch.rand(1, device=device).item() - 0.5) * 0.3 * attempt_idx
+                view = TF.adjust_contrast(view, contrast)
+                brightness = 1.0 + (torch.rand(1, device=device).item() - 0.5) * 0.25 * attempt_idx
+                view = TF.adjust_brightness(view, brightness)
+
+            if noise_strength > 0:
+                jitter = noise_strength * max(1, attempt_idx + 1)
+                noise = torch.randn_like(view) * jitter
+                view = (view + noise).clamp(0.0, 1.0)
+
+            variations.append(view.clamp(0.0, 1.0))
+
+        return variations
 
     def _move_mesh_to_device(self, vertices, faces, device):
         def _to_tensor(data):
@@ -353,39 +476,40 @@ class kiss3d_wrapper(object):
         view_h = max(64, self.flux_height // 2)
         view_w = max(64, self.flux_width // 4)
 
-        base = TF.to_tensor(input_image).to(flux_device)
+        base = TF.to_tensor(input_image)
         base = TF.resize(base, [view_h, view_w], antialias=True).clamp(0.0, 1.0)
 
-        variations = []
-        for idx in range(4):
-            view = base.clone()
-            if idx == 1:
-                view = TF.hflip(view)
-            elif idx == 2:
-                view = TF.adjust_hue(view, 0.08)
-            elif idx == 3:
-                view = TF.adjust_saturation(view, 1.15)
-            variations.append(view.clamp(0.0, 1.0))
+        flux_cfg = self.config.get("flux", {})
+        max_retries = int(flux_cfg.get("duplicate_retry_attempts", 3))
+        noise_strength = float(flux_cfg.get("duplicate_noise_strength", 0.03))
+        max_retries = max(0, max_retries)
+        last_seed_grid = None
 
-        seed_grid = torch.zeros(
-            (1, 3, self.flux_height, self.flux_width),
-            device=flux_device,
-            dtype=base.dtype,
-        )
-
-        for idx, view in enumerate(variations):
-            col = idx * view_w
-            seed_grid[:, :, :view_h, col : col + view_w] = view.unsqueeze(0)
-
-            normals = view.clone()
-            normals = (normals - normals.amin(dim=(-2, -1), keepdim=True)) / (
-                normals.amax(dim=(-2, -1), keepdim=True) - normals.amin(dim=(-2, -1), keepdim=True) + 1e-6
+        for attempt in range(max_retries + 1):
+            variations = self._generate_seed_variations(base, attempt, noise_strength)
+            seed_grid = self._compose_seed_grid_from_views(variations, view_h, view_w, flux_device)
+            has_duplicates = self._assert_no_duplicate_views(
+                seed_grid.squeeze(0),
+                stage_name="flux_seed_bundle",
+                similarity_threshold=0.999,
+                raise_on_fail=False,
             )
-            normals = normals * 0.6 + 0.2
-            seed_grid[:, :, view_h:, col : col + view_w] = normals.unsqueeze(0)
+            if not has_duplicates:
+                return seed_grid.clamp(0.0, 1.0)
 
-        self._assert_no_duplicate_views(seed_grid.squeeze(0), stage_name="flux_seed_bundle", similarity_threshold=0.999)
-        return seed_grid.clamp(0.0, 1.0)
+            logger.warning(
+                "[DUPLICATE_CHECK] flux_seed_bundle ainda possui vistas similares (tentativa %d/%d). "
+                "Aplicando jitter adicional no seed.",
+                attempt + 1,
+                max_retries,
+            )
+            last_seed_grid = seed_grid
+
+        logger.warning(
+            "[DUPLICATE_CHECK] Prosseguindo com flux_seed_bundle após %d tentativas; vistas podem permanecer semelhantes.",
+            max_retries + 1,
+        )
+        return (last_seed_grid or seed_grid).clamp(0.0, 1.0)
 
     def get_image_caption(self, image):
         if self.caption_model is None:
@@ -684,7 +808,11 @@ class kiss3d_wrapper(object):
 
         ref_3D_bundle_image = ref_3D_bundle_image.clip(0.0, 1.0)
 
-        self._assert_no_duplicate_views(ref_3D_bundle_image, stage_name="reference_bundle_image")
+        self._assert_no_duplicate_views(
+            ref_3D_bundle_image,
+            stage_name="reference_bundle_image",
+            raise_on_fail=False,
+        )
 
         if save_intermediate_results:
             save_path = os.path.join(TMP_DIR, f"{self.uuid}_ref_3d_bundle_image.png")
@@ -1018,7 +1146,11 @@ class kiss3d_wrapper(object):
         else:
             save_path = None
 
-        self._assert_no_duplicate_views(images, stage_name="flux_controlnet_bundle")
+        self._assert_no_duplicate_views(
+            images,
+            stage_name="flux_controlnet_bundle",
+            raise_on_fail=False,
+        )
 
         return images, save_path
 
@@ -1087,7 +1219,11 @@ class kiss3d_wrapper(object):
         else:
             save_path = None
 
-        self._assert_no_duplicate_views(images, stage_name="flux_text_bundle")
+        self._assert_no_duplicate_views(
+            images,
+            stage_name="flux_text_bundle",
+            raise_on_fail=False,
+        )
 
         return images, save_path
 
@@ -1239,6 +1375,14 @@ class kiss3d_wrapper(object):
                 os.path.join(TMP_DIR, f"{self.uuid}_lrm_recon_3d_bundle_image.png")
             )
         
+        lrm_mesh_path = os.path.join(TMP_DIR, f"{self.uuid}_recon_from_kiss3d.obj")
+        final_glb_path = os.path.join(OUT_DIR, f"{self.uuid}.glb")
+        final_obj_path = os.path.join(OUT_DIR, f"{self.uuid}.obj")
+        isomer_paths = [
+            os.path.join(OUT_DIR, f"{self.uuid}_isomer.glb"),
+            os.path.join(OUT_DIR, f"{self.uuid}_isomer.obj"),
+        ]
+
         # ISOMER reconstruction
         # Parâmetros otimizados para melhor qualidade
         stage1_steps = max(15, reconstruction_stage2_steps // 4)  # 25% dos steps do stage2, mínimo 15
@@ -1246,8 +1390,6 @@ class kiss3d_wrapper(object):
         if reconstruction_stage2_steps < 40:
             reconstruction_stage2_steps = max(40, reconstruction_stage2_steps)
             logger.info(f"Aumentando stage2_steps para {reconstruction_stage2_steps} para melhor qualidade")
-        
-        save_paths = [os.path.join(OUT_DIR, f"{self.uuid}.glb"), os.path.join(OUT_DIR, f"{self.uuid}.obj")]
         
         # Garantir que vertices e faces estão no device correto (CUDA) para ISOMER
         # lrm_reconstruct retorna em CPU, mas ISOMER precisa em CUDA
@@ -1268,7 +1410,7 @@ class kiss3d_wrapper(object):
             multi_view_mask=multi_view_mask,
             vertices=vertices,
             faces=faces,
-            save_paths=save_paths,
+            save_paths=isomer_paths,
             radius=isomer_radius,
             azimuths=[0, 90, 180, 270],  # CORRIGIDO: ordem explícita para consistência
             elevations=[5, 5, 5, 5],
@@ -1280,18 +1422,26 @@ class kiss3d_wrapper(object):
         )
         _empty_cuda_cache()
 
+        self._finalize_lrm_outputs(
+            lrm_obj_path=lrm_mesh_path,
+            final_obj_path=final_obj_path,
+            final_glb_path=final_glb_path,
+            fallback_obj=isomer_paths[1] if len(isomer_paths) > 1 else None,
+            fallback_glb=isomer_paths[0],
+        )
+
         if save_intermediate_results:
-            # O renderer espera arquivos OBJ; usar o OBJ exportado quando disponível
-            mesh_for_render = (
-                save_paths[1]
-                if len(save_paths) > 1 and save_paths[1].lower().endswith(".obj") and os.path.exists(save_paths[1])
-                else save_paths[0]
-            )
+            if lrm_mesh_path and os.path.exists(lrm_mesh_path):
+                mesh_for_render = lrm_mesh_path
+            elif len(isomer_paths) > 1 and os.path.exists(isomer_paths[1]):
+                mesh_for_render = isomer_paths[1]
+            else:
+                mesh_for_render = isomer_paths[0]
             bundle_image_rendered = render_3d_bundle_image_from_mesh(mesh_for_render)
             render_save_path = os.path.join(TMP_DIR, f"{self.uuid}_bundle_render.png")
             torchvision.utils.save_image(bundle_image_rendered, render_save_path)
 
-        return save_paths[0]  # Retorna o .glb
+        return final_glb_path  # Retorna o .glb principal baseado no LRM
 
 def _initialize_flux_branch(config_, dtype_, fast_mode, load_controlnet, load_redux):
     logger.info("==> Loading Flux model ...")
