@@ -902,9 +902,11 @@ class kiss3d_wrapper(object):
         rgb_views = rgb_source
         if rgb_views.shape[0] < 4:
             raise RuntimeError(f"Esperado ao menos 4 vistas do Zero123++, recebido {rgb_views.shape[0]}")
-        rgb_views = rgb_views[:4].to(recon_device)
 
-        normal_views = lrm_multi_view_normals[:4]
+        view_order = [3, 0, 1, 2]
+        rgb_views = rgb_views[view_order].to(recon_device)
+
+        normal_views = lrm_multi_view_normals[view_order]
         normal_views = ((normal_views + 1.0) / 2.0).clamp(0.0, 1.0).to(recon_device)
 
         from utils.tool import get_background
