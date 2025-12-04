@@ -1,0 +1,24 @@
+# Lista de objetos para processar com o pipeline Flux
+# Use estes comandos para rodar um de cada vez
+
+# 1. Gigabyte Motherboard
+.\mesh3d-generator-py3.11\Scripts\python.exe scripts\run_kiss3dgen_image_to_3d.py --input "data\raw\gazebo_dataset\images\Gigabyte_GA78LMTUSB3_50_Motherboard_Micro_ATX_Socket_AM3_0.jpg" --output "outputs\gigabyte_motherboard" --config "pipeline_config\default.yaml" --pipeline-mode flux
+
+# 2. Kong Puppy (Brinquedo rosa)
+.\mesh3d-generator-py3.11\Scripts\python.exe scripts\run_kiss3dgen_image_to_3d.py --input "data\raw\gazebo_dataset\images\Kong_Puppy_Teething_Rubber_Small_Pink_0.jpg" --output "outputs\kong_puppy" --config "pipeline_config\default.yaml" --pipeline-mode flux
+
+# 3. ABC Blocks Wagon (Brinquedo de veículo amarelo com blocos)
+.\mesh3d-generator-py3.11\Scripts\python.exe scripts\run_kiss3dgen_image_to_3d.py --input "data\raw\gazebo_dataset\images\Granimals_20_Wooden_ABC_Blocks_Wagon_g2TinmUGGHI_0.jpg" --output "outputs\abc_blocks_wagon" --config "pipeline_config\default.yaml" --pipeline-mode flux
+
+# 4. School Bus (Ônibus escolar)
+.\mesh3d-generator-py3.11\Scripts\python.exe scripts\run_kiss3dgen_image_to_3d.py --input "data\raw\gazebo_dataset\images\Sonny_School_Bus_0.jpg" --output "outputs\school_bus" --config "pipeline_config\default.yaml" --pipeline-mode flux
+
+# ============================================
+# ORDEM SUGERIDA DE EXECUÇÃO:
+# 1. Gigabyte Motherboard
+# 2. Kong Puppy
+# 3. ABC Blocks Wagon
+# 4. School Bus
+# ============================================
+# IMPORTANTE: Rode um de cada vez para não sobrecarregar o PC!
+
