@@ -23,6 +23,9 @@ pipeline_logger = logging.getLogger("kiss3dgen_pipeline")
 # Adicionar ninja ao PATH antes de qualquer import
 project_root = Path(__file__).parent.parent
 venv_path = project_root / "mesh3d-generator-py3.11"
+torch_ext_cache = project_root / "torch_extensions_cache"
+os.environ.setdefault("TORCH_EXTENSIONS_DIR", str(torch_ext_cache))
+os.makedirs(torch_ext_cache, exist_ok=True)
 possible_ninja_paths = [
     project_root,  # Pode estar na raiz do projeto
     venv_path / "Scripts",
