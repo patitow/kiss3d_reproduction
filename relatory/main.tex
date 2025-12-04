@@ -260,10 +260,10 @@ Na reprodução:
 O encoder multimodal Florence-2 foi utilizado exatamente como descrito no artigo para extrair tokens visuais consistentes com a câmera. Os pesos permaneceram congelados e o módulo opera inteiramente em FP16 para caber na RTX 3060.
 
 \subsection{LLM para contextualização textual (adaptado)}
-Os embeddings de Florence-2 são convertidos em descrições estruturadas por um LLM leve chamado via API. Esse passo substitui a etapa textual de alto custo do artigo e gera instruções compactas (por exemplo, estilo, material e ângulos desejados) que condicionam tanto o Flux quanto o Zero123++. Trata-se de uma adaptação motivada pela ausência de clusters multi-GPU e pela necessidade de prompts mais objetivos para a execução automática.
+Os embeddings de Florence-2 são convertidos em descrições estruturadas por um LLM leve chamado via API. Esse passo substitui a etapa textual de alto custo do artigo e gera instruções compactas (por exemplo, estilo, material e ângulos desejados) que condicionam tanto o Flux quanto o Zero123++. Cada prompt refinado é salvo em checkpoints intermediários para evitar reprocessamento: a codificação completa leva vários minutos no hardware disponível, portanto o armazenamento permite ajustes manuais antes de seguir para a difusão. Trata-se de uma adaptação motivada pela ausência de clusters multi-GPU e pela necessidade de prompts mais objetivos para a execução automática.
 
 \subsection{Zero123++ e Flux (adaptados)}
-Ambos os geradores multi-view foram mantidos, porém operando estritamente em inferência e com \textbf{LoRAs de baixo rank}. O Zero123++ é priorizado quando há imagem de entrada, enquanto o Flux é chamado apenas quando o condicionamento é textual. Quando o Flux entra em cena, ele é acoplado a \textbf{ControlNets Tile e Canny} para preservar bordas e padrões globais e, em seguida, passa por um passe rápido de \textbf{Redux} para retirar artefatos de ruído. Esses módulos extras só são ativados em resoluções 512$\times$512, pois cada ControlNet consome aproximadamente 2GB adicionais de VRAM na RTX 3060. Em todos os casos, bundles acima dessa resolução foram explicitamente descartadas para evitar \textit{out-of-memory}.
+Ambos os geradores multi-view foram mantidos, porém operando estritamente em inferência e com \textbf{LoRAs de baixo rank}. O Zero123++ é priorizado quando há imagem de entrada, enquanto o Flux é chamado apenas quando o condicionamento é textual. Os dois foram encapsulados em pipelines independentes para permitir comparação direta e, principalmente, para descarregar um modelo da VRAM antes de carregar o outro. Quando o Flux entra em cena, ele é acoplado a \textbf{ControlNets Tile e Canny} para preservar bordas e padrões globais e, em seguida, passa por um passe rápido de \textbf{Redux} para retirar artefatos de ruído. Esses módulos extras só são ativados em resoluções 512$\times$512, pois cada ControlNet consome aproximadamente 2GB adicionais de VRAM na RTX 3060. Em todos os casos, bundles acima dessa resolução foram explicitamente descartadas para evitar \textit{out-of-memory}.
 
 \subsection{LRM (mantido)}
 O Large Reconstruction Model foi preservado na íntegra, mas as execuções ocorreram com batch size igual a 1, gradient checkpointing e limpeza da VRAM entre chamadas. Esse ajuste operacional garante estabilidade sem alterar a arquitetura.
@@ -288,7 +288,7 @@ Fluxo executado:
 \item \textbf{Construção da 3D Bundle Image} (RGB + normais em 512$\times$512) seguindo a grade 2x4 do artigo;
 \item \textbf{Inicialização da malha com o LRM}, respeitando batch size 1 e gradient checkpointing;
 \item \textbf{Refino com o ISOMER} utilizando metade das iterações originais;
-\item \textbf{Projeção final de textura} diretamente das bundles renderizadas.
+\item \textbf{Projeção final de textura e exportação OBJ/GLB} diretamente das bundles renderizadas.
 \end{enumerate}
 
 Essa estrutura em cadeia \textbf{Florence-2 → LLM → Zero123++/Flux → LRM → ISOMER} permaneceu idêntica à proposta original; somente as configurações de execução (resolução, batch size e número de iterações) foram ajustadas para caber na RTX 3060 com 12GB.
@@ -315,6 +315,8 @@ No artigo, o treinamento ocorreu em \textbf{8 GPUs A800 de 80GB} por 3 dias.
 
 \section{Experimentos, Métricas e Resultados}
 
+O artigo original apresenta uma avaliação quantitativa extensa, combinando métricas de similaridade visual, reconstrução geométrica e consistência semântica entre vistas. Essas métricas são calculadas em grandes coleções de objetos com malhas de referência disponíveis.
+
 No artigo, as métricas utilizadas foram:
 
 \begin{itemize}
@@ -326,7 +328,9 @@ No artigo, as métricas utilizadas foram:
 \item F-Score (FS).
 \end{itemize}
 
-Na reprodução:
+Nenhuma dessas métricas foi recomputada nesta reprodução, pois isso exigiria renderização sistemática das malhas de referência do Google Scanned Objects (GSO) sob múltiplas câmeras, o que está além do orçamento computacional de uma única RTX 3060.
+
+Na reprodução, a avaliação concentrou-se em aspectos qualitativos:
 \begin{itemize}
 \item Avaliação qualitativa visual;
 \item Comparação de consistência geométrica;
@@ -334,23 +338,27 @@ Na reprodução:
 \item Presença de artefatos.
 \end{itemize}
 
-Os resultados qualitativos foram coletados em um conjunto reduzido de objetos de cozinha e brinquedos, escolhidos por caberem em 12GB de VRAM. Bundles com superfícies altamente reflexivas exigiram repetição do passo Zero123++ para remover borrões; ainda assim, a geometria final permaneceu compatível com uso em renderizações estáticas após o ISOMER.
+Os resultados qualitativos foram coletados em um conjunto reduzido de objetos de cozinha e brinquedos, escolhidos por caberem em 12GB de VRAM e possuírem boa cobertura visual no GSO. De forma geral, as malhas geradas apresentaram geometria global coerente com o objeto-alvo, porém com texturas ligeiramente desbotadas e perda de detalhes finos, em linha com a baixa resolução adotada. Bundles com superfícies altamente reflexivas exigiram repetição do passo Zero123++ para remover borrões; ainda assim, a geometria final permaneceu compatível com uso em visualizações estáticas após o ISOMER.
 
 ---
 
 \section{Comparações Relevantes}
 
-De acordo com o artigo original, o Kiss3DGen apresentou vantagens sobre MVDream (multi-view), 3DTopia, Direct2.5, Hunyuan3D-1.0 (Text-to-3D) e variantes do LRM (Image-to-3D). Nenhum desses experimentos foi repetido aqui: a reprodução limitou-se ao pipeline de inferência em hardware de consumidor, sem medições quantitativas. Todas as comparações mencionadas nesta seção devem, portanto, ser interpretadas apenas como referência bibliográfica.
+De acordo com o artigo original, o Kiss3DGen apresentou vantagens sobre MVDream (multi-view), 3DTopia, Direct2.5, Hunyuan3D-1.0 (Text-to-3D) e variantes do LRM (Image-to-3D), quando avaliado em larga escala com métricas quantitativas. Nenhum desses experimentos comparativos foi repetido aqui: a reprodução limitou-se ao pipeline de inferência em hardware de consumidor, operando sobre um subconjunto de 200 objetos do GSO e sem medições numéricas. Todas as comparações mencionadas nesta seção devem, portanto, ser interpretadas apenas como referência bibliográfica ao artigo, e não como evidência empírica adicional produzida neste trabalho.
 
 ---
 
 \section{Discussão Crítica}
 
+\noindent A reprodução do pipeline Kiss3DGen em uma única RTX 3060 evidenciou um conjunto claro de compromissos entre fidelidade geométrica, qualidade de textura, tempo de inferência e complexidade de engenharia. Os principais pontos observados foram:
+
 \begin{itemize}
 \item Forte dependência de hardware no estágio de reconstrução;
 \item ISOMER é sensível ao número de steps;
 \item Inicialização via LRM melhora drasticamente os resultados;
-\item Execução em GPU de entrada é possível, porém lenta;
+\item Execução em GPU de entrada é possível, porém lenta (cerca de 40 minutos por objeto, dos quais ~30 minutos são gastos apenas na geração de embeddings do Flux);
+\item Instabilidade operacional frequente: cargas longas de Zero123++/Flux falham quando a VRAM não é liberada no tempo certo;
+\item Dependências complexas (PyTorch3D, nvdiffrast, xformers, MSVC/Ninja) exigiram compilações manuais específicas para CUDA 12.1, consumindo parte significativa do tempo total do projeto;
 \item Pipeline é modular e extensível.
 \end{itemize}
 
@@ -361,17 +369,20 @@ De acordo com o artigo original, o Kiss3DGen apresentou vantagens sobre MVDream 
 \textbf{Conclusões:}
 \begin{itemize}
 \item O Kiss3DGen transforma geração 3D em um problema 2D estruturado;
-\item A abordagem é eficiente, elegante e altamente escalável;
-\item A reprodução foi bem-sucedida dentro das limitações de hardware.
+\item A abordagem é conceitualmente eficiente, elegante e modular, permitindo desacoplar geração de vistas, reconstrução e refinamento;
+\item A reprodução demonstrou a viabilidade do pipeline em hardware de entrada, ainda que com tempo de inferência elevado e limitações de qualidade impostas pela resolução e pela VRAM disponível.
 \end{itemize}
 
 \textbf{Pontos de melhoria:}
 \begin{itemize}
 \item Suporte a resoluções mais altas;
 \item Otimização do ISOMER para GPUs de entrada;
-\item Integração com ControlNet;
+\item Integração mais ampla com ControlNets e LoRAs adicionais (além de Tile/Canny), sem necessidade de descarregar manualmente os pesos;
 \item Geração de normais em maior fidelidade;
-\item Redução de tempo de inferência.
+\item Redução de tempo de inferência por meio da otimização dos VAEs/embeddings e do pré-processamento textual;
+\item Migração do pipeline para Linux para reduzir o “dependency hell” observado no Windows;
+\item Pós-processamento dedicado de texturas e malhas, incluindo etapas extras de refino no ComfyUI e/ou novos métodos de difusão 3D;
+\item Automatização do carregamento/descarga de modelos para minimizar erros humanos durante execuções sequenciais.
 \end{itemize}
 
 ---
