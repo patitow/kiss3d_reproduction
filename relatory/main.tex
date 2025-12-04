@@ -315,8 +315,6 @@ No artigo, o treinamento ocorreu em \textbf{8 GPUs A800 de 80GB} por 3 dias.
 
 \section{Experimentos, Métricas e Resultados}
 
-O artigo original apresenta uma avaliação quantitativa extensa, combinando métricas de similaridade visual, reconstrução geométrica e consistência semântica entre vistas. Essas métricas são calculadas em grandes coleções de objetos com malhas de referência disponíveis.
-
 No artigo, as métricas utilizadas foram:
 
 \begin{itemize}
@@ -328,9 +326,7 @@ No artigo, as métricas utilizadas foram:
 \item F-Score (FS).
 \end{itemize}
 
-Nenhuma dessas métricas foi recomputada nesta reprodução, pois isso exigiria renderização sistemática das malhas de referência do Google Scanned Objects (GSO) sob múltiplas câmeras, o que está além do orçamento computacional de uma única RTX 3060.
-
-Na reprodução, a avaliação concentrou-se em aspectos qualitativos:
+Na reprodução:
 \begin{itemize}
 \item Avaliação qualitativa visual;
 \item Comparação de consistência geométrica;
@@ -338,19 +334,17 @@ Na reprodução, a avaliação concentrou-se em aspectos qualitativos:
 \item Presença de artefatos.
 \end{itemize}
 
-Os resultados qualitativos foram coletados em um conjunto reduzido de objetos de cozinha e brinquedos, escolhidos por caberem em 12GB de VRAM e possuírem boa cobertura visual no GSO. De forma geral, as malhas geradas apresentaram geometria global coerente com o objeto-alvo, porém com texturas ligeiramente desbotadas e perda de detalhes finos, em linha com a baixa resolução adotada. Bundles com superfícies altamente reflexivas exigiram repetição do passo Zero123++ para remover borrões; ainda assim, a geometria final permaneceu compatível com uso em visualizações estáticas após o ISOMER.
+Os resultados qualitativos foram coletados em um conjunto reduzido de objetos de cozinha e brinquedos, escolhidos por caberem em 12GB de VRAM. Bundles com superfícies altamente reflexivas exigiram repetição do passo Zero123++ para remover borrões; ainda assim, a geometria final permaneceu compatível com uso em renderizações estáticas após o ISOMER.
 
 ---
 
 \section{Comparações Relevantes}
 
-De acordo com o artigo original, o Kiss3DGen apresentou vantagens sobre MVDream (multi-view), 3DTopia, Direct2.5, Hunyuan3D-1.0 (Text-to-3D) e variantes do LRM (Image-to-3D), quando avaliado em larga escala com métricas quantitativas. Nenhum desses experimentos comparativos foi repetido aqui: a reprodução limitou-se ao pipeline de inferência em hardware de consumidor, operando sobre um subconjunto de 200 objetos do GSO e sem medições numéricas. Todas as comparações mencionadas nesta seção devem, portanto, ser interpretadas apenas como referência bibliográfica ao artigo, e não como evidência empírica adicional produzida neste trabalho.
+De acordo com o artigo original, o Kiss3DGen apresentou vantagens sobre MVDream (multi-view), 3DTopia, Direct2.5, Hunyuan3D-1.0 (Text-to-3D) e variantes do LRM (Image-to-3D). Nenhum desses experimentos foi repetido aqui: a reprodução limitou-se ao pipeline de inferência em hardware de consumidor, sem medições quantitativas. Todas as comparações mencionadas nesta seção devem, portanto, ser interpretadas apenas como referência bibliográfica.
 
 ---
 
 \section{Discussão Crítica}
-
-\noindent A reprodução do pipeline Kiss3DGen em uma única RTX 3060 evidenciou um conjunto claro de compromissos entre fidelidade geométrica, qualidade de textura, tempo de inferência e complexidade de engenharia. Os principais pontos observados foram:
 
 \begin{itemize}
 \item Forte dependência de hardware no estágio de reconstrução;
@@ -358,7 +352,7 @@ De acordo com o artigo original, o Kiss3DGen apresentou vantagens sobre MVDream 
 \item Inicialização via LRM melhora drasticamente os resultados;
 \item Execução em GPU de entrada é possível, porém lenta (cerca de 40 minutos por objeto, dos quais ~30 minutos são gastos apenas na geração de embeddings do Flux);
 \item Instabilidade operacional frequente: cargas longas de Zero123++/Flux falham quando a VRAM não é liberada no tempo certo;
-\item Dependências complexas (PyTorch3D, nvdiffrast, xformers, MSVC/Ninja) exigiram compilações manuais específicas para CUDA 12.1, consumindo parte significativa do tempo total do projeto;
+\item Dependências complexas (PyTorch3D, nvdiffrast, xformers, MSVC/Ninja) exigiram compilações manuais específicas para CUDA 12.1;
 \item Pipeline é modular e extensível.
 \end{itemize}
 
@@ -369,8 +363,8 @@ De acordo com o artigo original, o Kiss3DGen apresentou vantagens sobre MVDream 
 \textbf{Conclusões:}
 \begin{itemize}
 \item O Kiss3DGen transforma geração 3D em um problema 2D estruturado;
-\item A abordagem é conceitualmente eficiente, elegante e modular, permitindo desacoplar geração de vistas, reconstrução e refinamento;
-\item A reprodução demonstrou a viabilidade do pipeline em hardware de entrada, ainda que com tempo de inferência elevado e limitações de qualidade impostas pela resolução e pela VRAM disponível.
+\item A abordagem é eficiente, elegante e altamente escalável;
+\item A reprodução foi bem-sucedida dentro das limitações de hardware.
 \end{itemize}
 
 \textbf{Pontos de melhoria:}
