@@ -53,6 +53,8 @@ logger = logging.getLogger("kiss3d_wrapper_local")
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO)
 
+EXPORT_CACHE: dict[str, dict[str, np.ndarray]] = {}
+
 ENV_FILE_PATH = PROJECT_ROOT / ".env"
 
 
@@ -478,10 +480,21 @@ def isomer_reconstruct(
     
     # Monkey-patch: substituir função de salvamento pela nossa versão melhorada
     import models.ISOMER.scripts.utils as isomer_utils
-    original_save = isomer_utils.save_py3dmesh_with_trimesh_fast
-    isomer_utils.save_py3dmesh_with_trimesh_fast = lambda m, p, **kwargs: save_py3dmesh_with_trimesh_fast_local(
-        m, p, apply_sRGB_to_LinearRGB=True, use_uv_texture=True, texture_resolution=2048
-    )
+    import models.ISOMER.scripts.proj_commands as isomer_proj
+
+    def _patched_save(meshes_arg, path_arg, **kwargs):
+        return save_py3dmesh_with_trimesh_fast_local(
+            meshes_arg,
+            path_arg,
+            apply_sRGB_to_LinearRGB=True,
+            use_uv_texture=True,
+            texture_resolution=2048,
+        )
+
+    original_save_utils = isomer_utils.save_py3dmesh_with_trimesh_fast
+    original_save_proj = isomer_proj.save_py3dmesh_with_trimesh_fast
+    isomer_utils.save_py3dmesh_with_trimesh_fast = _patched_save
+    isomer_proj.save_py3dmesh_with_trimesh_fast = _patched_save
     
     try:
         save_glb_addr = projection(
@@ -497,22 +510,113 @@ def isomer_reconstruct(
             save_addrs=[save_paths[0]] if save_paths else None,  # Apenas GLB para projection
         )
         
-        # Salvar OBJ separadamente se necessário
-        if save_paths and len(save_paths) > 1 and save_paths[1].endswith('.obj'):
+        # Salvar OBJ separadamente se necessário (reutilizando o mesmo pipeline de export)
+        if save_paths and len(save_paths) > 1 and save_paths[1].endswith(".obj"):
             import trimesh
-            # Converter meshes para OBJ
-            vertices = meshes.verts_packed().cpu().float().numpy()
-            triangles = meshes.faces_packed().cpu().long().numpy()
-            np_color = meshes.textures.verts_features_packed().cpu().float().numpy()
-            
-            # Criar mesh trimesh e salvar OBJ
-            mesh = trimesh.Trimesh(vertices=vertices, faces=triangles, vertex_colors=np_color)
-            mesh.remove_unreferenced_vertices()
-            mesh.export(save_paths[1])
-            logger.info(f"==> Saved OBJ to {save_paths[1]}")
+
+            obj_path = Path(save_paths[1])
+            obj_path.parent.mkdir(parents=True, exist_ok=True)
+
+            glb_candidates = [
+                path
+                for path in (save_paths[0:1] if save_paths else [])
+                if path.lower().endswith(".glb") and Path(path).exists()
+            ]
+            if save_glb_addr and Path(save_glb_addr).exists():
+                glb_candidates.append(save_glb_addr)
+
+            conversion_success = False
+
+            # Primeiro, tentar reutilizar dados cacheados do salvamento do GLB
+            for candidate in glb_candidates:
+                cache = EXPORT_CACHE.get(candidate)
+                if cache is None:
+                    continue
+                vertices = cache["vertices"].copy()
+                triangles = cache["triangles"].copy()
+                rgba_colors = cache["rgba_colors"].copy()
+                rgb_float = (rgba_colors[:, :3].astype(np.float32) / 255.0)
+                _log_color_stats("ISOMER.manual_obj.vertex_colors.raw", rgb_float)
+                _log_color_stats("ISOMER.manual_obj.rgba_uint8", rgba_colors)
+                mesh = trimesh.Trimesh(vertices=vertices, faces=triangles, vertex_colors=rgba_colors)
+                mesh.remove_unreferenced_vertices()
+                mesh.export(obj_path)
+                conversion_success = True
+                logger.info("==> Saved OBJ to %s usando cache de %s", obj_path, candidate)
+                break
+
+            # Se cache não disponível, tenta converter o GLB
+            for candidate in glb_candidates:
+                if conversion_success:
+                    break
+                try:
+                    loaded = trimesh.load(candidate, force="scene")
+                    if isinstance(loaded, trimesh.Scene):
+                        if not loaded.geometry:
+                            raise ValueError("Cena GLB sem geometria para exportar")
+                        meshes_to_merge = []
+                        for geom in loaded.geometry.values():
+                            g = geom.copy()
+                            g.visual = g.visual.to_color()
+                            meshes_to_merge.append(g)
+                        merged = (
+                            trimesh.util.concatenate(meshes_to_merge)
+                            if len(meshes_to_merge) > 1
+                            else meshes_to_merge[0]
+                        )
+                    else:
+                        merged = loaded.copy()
+                        merged.visual = merged.visual.to_color()
+
+                    colors = np.asarray(merged.visual.vertex_colors)
+                    _log_color_stats("ISOMER.manual_obj.vertex_colors.raw", colors)
+                    if colors.shape[1] == 3 or colors.max() <= 1.1:
+                        rgba_colors = np.concatenate(
+                            [
+                                np.clip(colors[..., :3], 0, 1),
+                                np.ones((colors.shape[0], 1), dtype=colors.dtype),
+                            ],
+                            axis=1,
+                        )
+                        rgba_colors = (rgba_colors * 255).astype(np.uint8)
+                    else:
+                        rgba_colors = colors.astype(np.uint8, copy=False)
+                        if rgba_colors.shape[1] == 3:
+                            rgba_colors = np.concatenate(
+                                [rgba_colors, 255 * np.ones((rgba_colors.shape[0], 1), dtype=rgba_colors.dtype)],
+                                axis=1,
+                            )
+                    _log_color_stats("ISOMER.manual_obj.rgba_uint8", rgba_colors)
+                    merged.visual.vertex_colors = rgba_colors
+                    merged.export(obj_path)
+                    conversion_success = True
+                    logger.info("==> Saved OBJ to %s convertendo a partir de %s", obj_path, candidate)
+                    break
+                except Exception as exc:
+                    logger.exception("Falha ao converter GLB (%s) para OBJ colorido: %s", candidate, exc)
+
+            if not conversion_success:
+                manual_colors = meshes.textures.verts_features_packed().cpu().float().numpy()
+                _log_color_stats("ISOMER.manual_obj.vertex_colors.raw", manual_colors)
+                manual_restored = _restore_color_dynamic_range(manual_colors)
+                manual_restored = np.clip(manual_restored, 0, 1)
+                manual_rgba = np.concatenate(
+                    [manual_restored, np.ones((manual_restored.shape[0], 1), dtype=manual_restored.dtype)],
+                    axis=1,
+                )
+                manual_rgba = (manual_rgba * 255).astype(np.uint8)
+                _log_color_stats("ISOMER.manual_obj.rgba_uint8", manual_rgba)
+                _patched_save(
+                    meshes,
+                    str(obj_path),
+                    apply_sRGB_to_LinearRGB=True,
+                    use_uv_texture=False,
+                    texture_resolution=2048,
+                )
     finally:
         # Restaurar função original
-        isomer_utils.save_py3dmesh_with_trimesh_fast = original_save
+        isomer_utils.save_py3dmesh_with_trimesh_fast = original_save_utils
+        isomer_proj.save_py3dmesh_with_trimesh_fast = original_save_proj
 
     logger.info(f"==> Save mesh to {save_paths} ...")
     print(f"ISMOER time: {time.time() - end:.2f}s")
@@ -614,6 +718,7 @@ def save_py3dmesh_with_trimesh_fast_local(
         use_uv_texture: se True, tenta criar textura UV (melhor qualidade)
         texture_resolution: resolução da textura se use_uv_texture=True
     """
+    global EXPORT_CACHE
     from pytorch3d.structures import Meshes
     
     # Converter de pytorch3d para numpy
@@ -643,6 +748,12 @@ def save_py3dmesh_with_trimesh_fast_local(
     )
     rgba_colors = (rgba_colors * 255).astype(np.uint8)
     _log_color_stats("ISOMER.vertex_colors.rgba_uint8", rgba_colors)
+
+    EXPORT_CACHE[save_glb_path] = {
+        "vertices": vertices.copy(),
+        "triangles": triangles.copy(),
+        "rgba_colors": rgba_colors.copy(),
+    }
     
     # Tentar criar textura UV se solicitado e for GLB
     if use_uv_texture and save_glb_path.endswith(".glb"):

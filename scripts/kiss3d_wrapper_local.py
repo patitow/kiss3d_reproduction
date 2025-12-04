@@ -191,6 +191,8 @@ class kiss3d_wrapper(object):
         )
 
         self.renew_uuid()
+        self._last_reference_rgb_views: torch.Tensor | None = None
+        self._last_reference_normal_views: torch.Tensor | None = None
 
         self._clip_text_encoder_cpu = None
         self._clip_tokenizer_cpu = None
@@ -204,33 +206,51 @@ class kiss3d_wrapper(object):
         self.uuid = uuid.uuid4()
 
     @staticmethod
-    def _finalize_lrm_outputs(lrm_obj_path: str, final_obj_path: str, final_glb_path: str, fallback_obj: str | None = None, fallback_glb: str | None = None):
+    def _finalize_lrm_outputs(
+        lrm_obj_path: str,
+        final_obj_path: str,
+        final_glb_path: str,
+        fallback_obj: str | None = None,
+        fallback_glb: str | None = None,
+    ):
+        """
+        Promove os artefatos finais, priorizando a reconstrução ISOMER (fallback_*).
+        O OBJ do LRM é usado apenas como último recurso.
+        """
         os.makedirs(os.path.dirname(final_obj_path), exist_ok=True)
         os.makedirs(os.path.dirname(final_glb_path), exist_ok=True)
 
-        if lrm_obj_path and os.path.exists(lrm_obj_path):
-            shutil.copy2(lrm_obj_path, final_obj_path)
-            logger.info(f"[RECON] OBJ principal atualizado a partir do LRM: {final_obj_path}")
-        elif fallback_obj and os.path.exists(fallback_obj):
-            shutil.copy2(fallback_obj, final_obj_path)
-            logger.warning(f"[RECON] LRM OBJ ausente, usando fallback ISOMER em {fallback_obj}")
+        primary_obj_source = None
+        if fallback_obj and os.path.exists(fallback_obj):
+            primary_obj_source = fallback_obj
+            logger.info(f"[RECON] Promovendo OBJ do ISOMER: {fallback_obj}")
+        elif lrm_obj_path and os.path.exists(lrm_obj_path):
+            primary_obj_source = lrm_obj_path
+            logger.warning(f"[RECON] ISOMER OBJ ausente, promovendo saída do LRM: {lrm_obj_path}")
         else:
             logger.error("[RECON] Nenhum OBJ disponível para promover")
+
+        if primary_obj_source:
+            shutil.copy2(primary_obj_source, final_obj_path)
+
+        primary_glb_source = None
+        if fallback_glb and os.path.exists(fallback_glb):
+            primary_glb_source = fallback_glb
+            shutil.copy2(primary_glb_source, final_glb_path)
+            logger.info(f"[RECON] GLB principal copiado do ISOMER: {fallback_glb}")
+            return
 
         glb_promoted = False
         if os.path.exists(final_obj_path) and trimesh is not None:
             try:
-                mesh = trimesh.load(final_obj_path, force='mesh', process=False)
+                mesh = trimesh.load(final_obj_path, force="mesh", process=False)
                 mesh.export(final_glb_path)
                 glb_promoted = True
                 logger.info(f"[RECON] GLB convertido do OBJ principal: {final_glb_path}")
             except Exception as exc:
-                logger.warning(f"[RECON] Falha ao converter OBJ -> GLB ({exc}); usando fallback")
+                logger.warning(f"[RECON] Falha ao converter OBJ -> GLB ({exc})")
 
-        if not glb_promoted and fallback_glb and os.path.exists(fallback_glb):
-            shutil.copy2(fallback_glb, final_glb_path)
-            logger.warning(f"[RECON] GLB principal usando fallback ISOMER em {fallback_glb}")
-        elif not glb_promoted and fallback_glb is None:
+        if not glb_promoted:
             logger.error("[RECON] Nenhum GLB disponível para salvar")
 
     def context(self):
@@ -397,6 +417,29 @@ class kiss3d_wrapper(object):
 
         return variations
 
+    def _apply_reference_normals(self, bundle_tensor: torch.Tensor) -> torch.Tensor:
+        if self._last_reference_normal_views is None:
+            logger.warning("[FLUX] Normais reais indisponíveis; mantendo saída do modelo para a linha inferior do bundle.")
+            return bundle_tensor
+
+        bundle = bundle_tensor.detach().clone()
+        if bundle.dim() == 3:
+            bundle = bundle.unsqueeze(0)
+
+        target_h = bundle.shape[2] // 2
+        target_w = bundle.shape[3]
+
+        normals_grid = torchvision.utils.make_grid(
+            self._last_reference_normal_views,
+            nrow=4,
+            padding=0,
+        )
+        normals_grid = TF.resize(normals_grid, [target_h, target_w], antialias=True)
+        normals_grid = normals_grid.to(bundle.dtype)
+
+        bundle[:, :, target_h:, :] = normals_grid.unsqueeze(0)
+        return bundle
+
     def _move_mesh_to_device(self, vertices, faces, device):
         def _to_tensor(data):
             if isinstance(data, torch.Tensor):
@@ -471,11 +514,23 @@ class kiss3d_wrapper(object):
 
         return prompt_embeds, pooled_prompt_embeds
 
-    def _build_flux_seed_bundle(self, input_image: Image.Image) -> torch.Tensor:
+    def _build_flux_seed_bundle(
+        self,
+        input_image: Image.Image,
+        reference_bundle: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         flux_device = torch.device(self.config["flux"].get("device", "cpu"))
         view_h = max(64, self.flux_height // 2)
         view_w = max(64, self.flux_width // 4)
 
+        if reference_bundle is not None:
+            seed = reference_bundle.detach().clone()
+            if seed.dim() == 3:
+                seed = seed.unsqueeze(0)
+            seed = TF.resize(seed, [self.flux_height, self.flux_width], antialias=True)
+            return seed.to(flux_device, dtype=torch.float32).clamp(0.0, 1.0)
+
+        # Fallback: repetir lógica sintética anterior
         base = TF.to_tensor(input_image)
         base = TF.resize(base, [view_h, view_w], antialias=True).clamp(0.0, 1.0)
 
@@ -784,27 +839,22 @@ class kiss3d_wrapper(object):
             lrm_multi_view_albedo,
         ) = self.reconstruct_from_multiview(mv_image)
 
+        view_order = [3, 0, 1, 2]  # [front, right, back, left]
         if use_mv_rgb:
-            # As câmeras de entrada do Zero123++ são [0, 90, 180, 270]
-            # O rearrange organiza as vistas como: [0, 1, 2, 3] = [top-left, top-right, bottom-left, bottom-right]
-            # Mas precisamos alinhar com os azimutes de renderização [270, 0, 90, 180]
-            # Então a ordem correta é [3, 0, 1, 2] para corresponder aos azimutes
-            # NO ENTANTO, se há duplicação, pode ser que o problema esteja na ordem das vistas
-            # Vamos tentar usar a ordem original [0, 1, 2, 3] primeiro para ver se resolve
-            ref_3D_bundle_image = torchvision.utils.make_grid(
-                torch.cat(
-                    [rgb_multi_view.squeeze(0).detach().cpu()[[0, 1, 2, 3]], (lrm_multi_view_normals.cpu() + 1) / 2],
-                    dim=0,
-                ),
-                nrow=4,
-                padding=0,
-            )  # range [0, 1]
+            rgb_views = rgb_multi_view.squeeze(0).detach().cpu()
         else:
-            ref_3D_bundle_image = torchvision.utils.make_grid(
-                torch.cat([lrm_multi_view_rgb.cpu(), (lrm_multi_view_normals.cpu() + 1) / 2], dim=0),
-                nrow=4,
-                padding=0,
-            )  # range [0, 1]
+            rgb_views = lrm_multi_view_rgb.cpu()
+        rgb_views = rgb_views[view_order]
+        normal_views = ((lrm_multi_view_normals.cpu() + 1) / 2)[view_order]
+
+        self._last_reference_rgb_views = rgb_views.clone()
+        self._last_reference_normal_views = normal_views.clone()
+
+        ref_3D_bundle_image = torchvision.utils.make_grid(
+            torch.cat([rgb_views, normal_views], dim=0),
+            nrow=4,
+            padding=0,
+        )  # range [0, 1]
 
         ref_3D_bundle_image = ref_3D_bundle_image.clip(0.0, 1.0)
 
@@ -905,9 +955,38 @@ class kiss3d_wrapper(object):
         caption: str,
         enable_redux: bool = True,
         use_controlnet: bool = True,
+        use_mv_rgb: bool = True,
     ):
         flux_device = self.config["flux"].get("device", "cpu")
-        flux_seed = self._build_flux_seed_bundle(input_image).to(flux_device)
+
+        reference_bundle = None
+        reference_path = None
+        try:
+            ref_data = self.generate_reference_3D_bundle_image_zero123(
+                input_image,
+                use_mv_rgb=use_mv_rgb,
+                save_intermediate_results=True,
+            )
+            if isinstance(ref_data, tuple):
+                reference_bundle, reference_path = ref_data
+            else:
+                reference_bundle = ref_data
+            logger.info(
+                "[FLUX] Bundle de referência Zero123++ disponível em %s",
+                reference_path or "<memória>",
+            )
+        except Exception as exc:
+            logger.warning(
+                "[FLUX] Falha ao gerar bundle de referência Zero123++: %s",
+                exc,
+            )
+        finally:
+            try:
+                self.offload_multiview_pipeline()
+            except Exception:
+                pass
+
+        flux_seed = self._build_flux_seed_bundle(input_image, reference_bundle).to(flux_device)
         seed_path = os.path.join(TMP_DIR, f"{self.uuid}_flux_seed_bundle.png")
         torchvision.utils.save_image(flux_seed, seed_path)
 
@@ -933,6 +1012,8 @@ class kiss3d_wrapper(object):
                 seq.append(seq[-1])
             return seq
 
+        control_reference = reference_bundle if reference_bundle is not None else flux_seed
+
         if use_controlnet and self.flux_pipeline and hasattr(self.flux_pipeline, "controlnet"):
             control_mode = flux_cfg.get("controlnet_modes", ["tile"])
             control_kernel = flux_cfg.get("controlnet_kernel_size", 51)
@@ -953,7 +1034,7 @@ class kiss3d_wrapper(object):
 
             control_images = [
                 self.preprocess_controlnet_cond_image(
-                    flux_seed,
+                    control_reference,
                     mode_,
                     down_scale=control_downscale,
                     kernel_size=control_kernel,
@@ -989,6 +1070,8 @@ class kiss3d_wrapper(object):
                 redux_hparam=redux_hparam,
             )
 
+        bundle_tensor = self._apply_reference_normals(bundle_tensor)
+
         self.offload_flux_pipelines()
         return bundle_tensor, bundle_path
 
@@ -999,12 +1082,14 @@ class kiss3d_wrapper(object):
         enable_redux: bool = True,
         use_controlnet: bool = True,
         reconstruction_stage2_steps: int | None = None,
+        use_mv_rgb: bool = True,
     ):
         bundle_tensor, bundle_path = self.generate_flux_bundle(
             input_image=input_image,
             caption=caption,
             enable_redux=enable_redux,
             use_controlnet=use_controlnet,
+            use_mv_rgb=use_mv_rgb,
         )
         mesh_path = self.reconstruct_3d_bundle_image(
             bundle_tensor,
@@ -1843,6 +1928,18 @@ def init_wrapper_from_config(
     with open(config_path, "r") as config_file:
         config_ = yaml.load(config_file, yaml.FullLoader)
 
+    seed_value = (
+        config_.get("seed")
+        or config_.get("flux", {}).get("seed")
+        or config_.get("multiview", {}).get("seed")
+        or config_.get("reconstruction", {}).get("seed")
+    )
+    if seed_value is not None:
+        try:
+            seed_everything(int(seed_value))
+        except Exception as exc:
+            logger.warning(f"[SEED] Falha ao aplicar seed ({seed_value}): {exc}")
+
     if torch.cuda.is_available():
         total_mem_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
         if not fast_mode and total_mem_gb <= 12.5:
@@ -2041,16 +2138,12 @@ def run_image_to_3d(
         )
         return None, mesh_glb or mesh_obj
 
-    bundle_tensor, bundle_path = k3d_wrapper.generate_flux_bundle(
+    bundle_path, recon_mesh_path = k3d_wrapper.run_flux_pipeline(
         input_image=input_image,
         caption=caption,
         enable_redux=enable_redux,
         use_controlnet=use_controlnet,
-    )
-    recon_mesh_path = k3d_wrapper.reconstruct_3d_bundle_image(
-        bundle_tensor,
-        save_intermediate_results=True,
-        isomer_radius=4.15,
+        use_mv_rgb=use_mv_rgb,
         reconstruction_stage2_steps=k3d_wrapper.get_reconstruction_stage2_steps(),
     )
     return bundle_path, recon_mesh_path

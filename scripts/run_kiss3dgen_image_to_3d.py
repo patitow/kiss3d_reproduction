@@ -994,15 +994,14 @@ def main():
         view_output_dir.mkdir(parents=True, exist_ok=True)
 
         bundle_copy = None
-        mesh_copy = view_output_dir / f"{job['display']}.glb"
+        mesh_copy = None
 
         if gen_save_path and os.path.exists(gen_save_path):
             bundle_copy = view_output_dir / f"{job['display']}_3d_bundle.png"
             shutil.copy2(gen_save_path, bundle_copy)
         if recon_mesh_path and os.path.exists(recon_mesh_path):
+            mesh_copy = view_output_dir / f"{job['display']}.glb"
             shutil.copy2(recon_mesh_path, mesh_copy)
-        else:
-            mesh_copy = None
 
         metrics = None
         metrics_file = None
@@ -1024,10 +1023,10 @@ def main():
             {
                 "label": job["label"],
                 "display": job["display"],
-                "bundle": str(bundle_copy) if bundle_copy else None,
-                "mesh": str(mesh_copy) if mesh_copy else None,
+                "bundle": bundle_copy,
+                "mesh": mesh_copy,
                 "metrics": metrics,
-                "metrics_file": str(metrics_file) if metrics_file else None,
+                "metrics_file": metrics_file,
                 "order": idx,
                 "pipeline_mode": args.pipeline_mode,
             }
@@ -1066,18 +1065,22 @@ def main():
     print("\n[4/4] Consolidando melhor resultado...")
     final_bundle = Path(args.output) / f"{best_name}_3d_bundle.png"
     final_mesh = Path(args.output) / f"{best_name}.glb"
-    if best_result["bundle"] and best_result["bundle"].exists():
-        shutil.copy2(best_result["bundle"], final_bundle)
+    bundle_source = best_result["bundle"]
+    mesh_source = best_result["mesh"]
+    metrics_source = best_result["metrics_file"]
+
+    if bundle_source and Path(bundle_source).exists():
+        shutil.copy2(bundle_source, final_bundle)
         print(f"[OK] Bundle selecionado: {final_bundle}")
-    if best_result["mesh"] and best_result["mesh"].exists():
-        shutil.copy2(best_result["mesh"], final_mesh)
+    if mesh_source and Path(mesh_source).exists():
+        shutil.copy2(mesh_source, final_mesh)
         print(f"[OK] Mesh selecionada: {final_mesh}")
 
     final_metrics_path = None
-    if best_result["metrics_file"] and best_result["metrics_file"].exists():
+    if metrics_source and Path(metrics_source).exists():
         target_metrics = Path(args.metrics_out) if args.metrics_out else Path(args.output) / f"{best_name}_metrics.json"
         target_metrics.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(best_result["metrics_file"], target_metrics)
+        shutil.copy2(metrics_source, target_metrics)
         final_metrics_path = target_metrics
         print(f"[OK] Métricas consolidadas: {final_metrics_path}")
 
@@ -1090,8 +1093,8 @@ def main():
                 "label": result["label"],
                 "display": result["display"],
                 "metrics": result["metrics"],
-                "bundle": str(result["bundle"]),
-                "mesh": str(result["mesh"]),
+                "bundle": str(result["bundle"]) if result["bundle"] else None,
+                "mesh": str(result["mesh"]) if result["mesh"] else None,
             }
             for result in job_results
         ],

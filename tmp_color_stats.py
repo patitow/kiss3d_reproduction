@@ -9,6 +9,12 @@ if len(sys.argv) < 2:
 
 mesh_path = Path(sys.argv[1])
 mesh = trimesh.load(mesh_path, process=False)
+if isinstance(mesh, trimesh.Scene):
+    if not mesh.geometry:
+        raise RuntimeError(f"Scene in {mesh_path} has no geometries")
+    mesh = trimesh.util.concatenate(
+        [g for g in mesh.geometry.values() if isinstance(g, trimesh.Trimesh)]
+    )
 
 visual = mesh.visual
 if hasattr(visual, "vertex_colors") and visual.vertex_colors is not None:
