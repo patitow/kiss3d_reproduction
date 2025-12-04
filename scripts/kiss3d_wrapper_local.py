@@ -389,6 +389,24 @@ class kiss3d_wrapper(object):
         noise = torch.randn(shape, generator=self._torch_rng)
         return noise.to(device)
 
+    def _compute_controlnet_conditioning_scale_adaptive(
+        self,
+        reference_bundle: torch.Tensor | None,
+        base_scale: float = 0.6,
+    ) -> float:
+        if reference_bundle is not None:
+            return min(1.0, base_scale * 1.5)
+        return base_scale
+
+    def _compute_redux_strength_adaptive(
+        self,
+        reference_bundle: torch.Tensor | None,
+        base_strength: float = 0.5,
+    ) -> float:
+        if reference_bundle is not None:
+            return base_strength * 0.7  # preservar detalhes do bundle real
+        return min(0.7, base_strength * 1.2)  # reforçar quando seed sintético
+
     def _generate_seed_variations(
         self,
         base: torch.Tensor,
@@ -465,12 +483,40 @@ class kiss3d_wrapper(object):
         mask = F.avg_pool2d(mask, kernel_size=5, stride=1, padding=2)
         return (mask > 0.25).float()
 
+    def _generate_robust_mask(
+        self,
+        rgb_multi_view: torch.Tensor,
+        normal_multi_view: torch.Tensor,
+        threshold_normal: float = 0.05,
+        threshold_rgb: float = 0.95,
+    ) -> torch.Tensor:
+        device = rgb_multi_view.device
+        normal_magnitude = torch.linalg.norm(normal_multi_view, dim=1, keepdim=True)
+        mask_normal = (normal_magnitude > threshold_normal).float()
+
+        rgb_mean = rgb_multi_view.mean(dim=1, keepdim=True)
+        mask_rgb = (rgb_mean < threshold_rgb).float()
+
+        combined_mask = mask_normal * mask_rgb
+        combined_mask = F.avg_pool2d(combined_mask, kernel_size=5, stride=1, padding=2)
+        combined_mask = (combined_mask > 0.25).float()
+
+        kernel = torch.ones(1, 1, 7, 7, device=device) / 49.0
+        combined_mask = F.conv2d(combined_mask, kernel, padding=3)
+        combined_mask = (combined_mask > 0.1).float()
+        return combined_mask
+
     def _format_multiview_prompt(self, caption: str) -> str:
         instructions = (
-            "Create a 2x4 multi-view atlas of a single object. "
-            "Top row (left to right): front, right, back, left RGB renders on a white background. "
-            "Bottom row repeats the same order but shows the corresponding surface normal maps. "
-            "Keep the subject centered, same scale in every tile, no props or shadows. "
+            "A precise 2x4 multi-view atlas of one object. "
+            "TOP ROW (left to right): "
+            "1) Front RGB render (azimuth 0°, elevation 5°), "
+            "2) Right RGB render (azimuth 90°, elevation 5°), "
+            "3) Back RGB render (azimuth 180°, elevation 5°), "
+            "4) Left RGB render (azimuth 270°, elevation 5°). "
+            "BOTTOM ROW (same order): the corresponding surface normal maps (tangent space, RGB encoded). "
+            "Requirements: white background (#FFFFFF) in all tiles; object centered, same scale across all 8 views; "
+            "consistent diffuse lighting, no shadows, no props or extra objects. "
             f"Object description: {caption}"
         )
         return instructions
@@ -943,18 +989,21 @@ class kiss3d_wrapper(object):
         raw_normal_views = lrm_multi_view_normals[view_order].to(recon_device)
         normal_views = ((raw_normal_views + 1.0) / 2.0).clamp(0.0, 1.0)
 
-        multi_view_mask = self._mask_from_normals(raw_normal_views)
+        multi_view_mask = self._generate_robust_mask(
+            rgb_views,
+            raw_normal_views,
+            threshold_normal=0.05,
+            threshold_rgb=0.97,
+        ).to(recon_device)
         if torch.all(multi_view_mask <= 0):
             from utils.tool import get_background
 
             multi_view_mask = get_background(normal_views.cpu()).to(recon_device)
-        else:
-            multi_view_mask = multi_view_mask.to(recon_device)
         rgb_views = rgb_views * multi_view_mask + (1 - multi_view_mask)
 
         vertices, faces = self._move_mesh_to_device(vertices, faces, recon_device)
 
-        stage1_steps = max(15, reconstruction_stage2_steps // 4)
+        stage1_steps = max(25, int(reconstruction_stage2_steps * 0.4))
         save_paths = [
             os.path.join(OUT_DIR, f"{self.uuid}.glb"),
             os.path.join(OUT_DIR, f"{self.uuid}.obj"),
@@ -972,8 +1021,8 @@ class kiss3d_wrapper(object):
             elevations=[5, 5, 5, 5],
             reconstruction_stage1_steps=stage1_steps,
             reconstruction_stage2_steps=reconstruction_stage2_steps,
-            geo_weights=[1.0, 0.95, 1.0, 0.95],
-            color_weights=[1.0, 0.7, 1.0, 0.7],
+            geo_weights=[1.0, 0.98, 1.0, 0.98],
+            color_weights=[1.0, 0.85, 1.0, 0.85],
         )
         _empty_cuda_cache()
 
@@ -1033,11 +1082,15 @@ class kiss3d_wrapper(object):
 
         redux_hparam = None
         if enable_redux and self.flux_redux_pipeline is not None:
+            redux_strength = self._compute_redux_strength_adaptive(
+                reference_bundle,
+                base_strength=self.config.get("img2img_defaults", {}).get("redux_strength", 0.5),
+            )
             redux_hparam = {
                 "image": self.to_512_tensor(input_image).unsqueeze(0).clip(0.0, 1.0),
                 "prompt_embeds_scale": 1.0,
                 "pooled_prompt_embeds_scale": 1.0,
-                "strength": 0.5,
+                "strength": redux_strength,
             }
 
         flux_cfg = self.config.get("flux", {})
@@ -1064,14 +1117,14 @@ class kiss3d_wrapper(object):
             control_downscale = flux_cfg.get("controlnet_down_scale", 1)
             control_guidance_start = flux_cfg.get("controlnet_guidance_start", 0.0)
             control_guidance_end = flux_cfg.get("controlnet_guidance_end", 0.65)
-            controlnet_conditioning_scale = flux_cfg.get("controlnet_conditioning_scale", 0.6)
+            base_scale = flux_cfg.get("controlnet_conditioning_scale", 0.6)
 
             control_mode = list(control_mode) if isinstance(control_mode, (list, tuple)) else [control_mode]
             control_guidance_start = _expand_sequence(control_guidance_start, 0.0, len(control_mode))
             control_guidance_end = _expand_sequence(control_guidance_end, 0.65, len(control_mode))
             controlnet_conditioning_scale = _expand_sequence(
-                controlnet_conditioning_scale,
-                0.6,
+                self._compute_controlnet_conditioning_scale_adaptive(reference_bundle, base_scale),
+                base_scale,
                 len(control_mode),
             )
 
@@ -1188,7 +1241,7 @@ class kiss3d_wrapper(object):
             "image": image,
             "strength": strength,
             "num_inference_steps": num_inference_steps,
-            "guidance_scale": 3.5,
+            "guidance_scale": 7.0,
             "num_images_per_prompt": 1,
             "width": self.flux_width,
             "height": self.flux_height,
@@ -1313,7 +1366,7 @@ class kiss3d_wrapper(object):
             "image": image,
             "strength": strength,
             "num_inference_steps": num_inference_steps,
-            "guidance_scale": 3.5,
+            "guidance_scale": 7.0,
             "num_images_per_prompt": 1,
             "width": self.flux_width,
             "height": self.flux_height,
@@ -1518,9 +1571,12 @@ class kiss3d_wrapper(object):
         # Parâmetros otimizados para melhor qualidade
         stage1_steps = max(15, reconstruction_stage2_steps // 4)  # 25% dos steps do stage2, mínimo 15
         # Aumentar stage2_steps se muito baixo para melhor qualidade
-        if reconstruction_stage2_steps < 40:
-            reconstruction_stage2_steps = max(40, reconstruction_stage2_steps)
+        if reconstruction_stage2_steps < 60:
+            reconstruction_stage2_steps = max(60, reconstruction_stage2_steps)
             logger.info(f"Aumentando stage2_steps para {reconstruction_stage2_steps} para melhor qualidade")
+        if self.config["reconstruction"].get("stage1_steps_override"):
+            stage1_steps = int(self.config["reconstruction"]["stage1_steps_override"])
+            logger.info(f"[RECON] stage1_steps override aplicado: {stage1_steps}")
         
         # Garantir que vertices e faces estão no device correto (CUDA) para ISOMER
         # lrm_reconstruct retorna em CPU, mas ISOMER precisa em CUDA
@@ -1970,9 +2026,31 @@ def init_wrapper_from_config(
     load_controlnet=True,
     load_redux=True,
     pipeline_mode: str = "flux",
+    quality_mode: str | None = None,
 ):
     with open(config_path, "r") as config_file:
         config_ = yaml.load(config_file, yaml.FullLoader)
+
+    # Aplicar perfil de qualidade (steps/guidance)
+    q_mode = quality_mode or config_.get("quality_mode")
+    q_profiles = config_.get("quality_modes", {})
+    if q_mode and q_mode in q_profiles:
+        profile = q_profiles[q_mode]
+        flux_steps = profile.get("flux_steps")
+        flux_guidance = profile.get("flux_guidance")
+        isomer_stage1 = profile.get("isomer_stage1")
+        isomer_stage2 = profile.get("isomer_stage2")
+        if flux_steps:
+            config_["flux"]["num_inference_steps"] = flux_steps
+        if flux_guidance:
+            # sincronizar com img2img_defaults guidance_scale
+            config_.setdefault("img2img_defaults", {})
+            config_["img2img_defaults"]["guidance_scale"] = flux_guidance
+        if isomer_stage2:
+            config_["reconstruction"]["stage2_steps"] = isomer_stage2
+        if isomer_stage1:
+            config_["reconstruction"]["stage1_steps_override"] = isomer_stage1
+        logger.info(f"[QUALITY] Aplicado perfil de qualidade '{q_mode}': {profile}")
 
     seed_value = (
         config_.get("seed")

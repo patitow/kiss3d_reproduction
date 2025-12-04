@@ -657,6 +657,13 @@ def main():
         help="Caminho para config YAML (relativo ao diretorio Kiss3DGen)",
     )
     parser.add_argument(
+        "--quality-mode",
+        type=str,
+        default=None,
+        choices=["fast", "balanced", "high"],
+        help="Perfil de qualidade (override do config).",
+    )
+    parser.add_argument(
         "--enable-redux",
         action=BooleanOptionalAction,
         default=True,
@@ -928,6 +935,7 @@ def main():
             load_controlnet=args.use_controlnet,
             load_redux=args.enable_redux,
             pipeline_mode=args.pipeline_mode,  # CORRIGIDO: passar pipeline_mode
+            quality_mode=args.quality_mode,
         )
         if k3d_wrapper.fast_mode and not args.fast_mode:
             print("[INFO] Fast mode ativado automaticamente (GPU <= 12GB detectada).")

@@ -101,6 +101,13 @@ def main():
         help="Caminho para config YAML (relativo ao diretório Kiss3DGen)",
     )
     parser.add_argument(
+        "--quality-mode",
+        type=str,
+        default=None,
+        choices=["fast", "balanced", "high"],
+        help="Perfil de qualidade (override do config).",
+    )
+    parser.add_argument(
         "--enable-redux",
         action=BooleanOptionalAction,
         default=True,

@@ -656,6 +656,13 @@ def main():
     parser.add_argument("--input", type=str, required=True, help="Caminho da imagem de entrada")
     parser.add_argument("--output", type=str, required=True, help="Diretório de saída")
     parser.add_argument("--config", type=str, default="Kiss3DGen/pipeline/pipeline_config/default.yaml")
+    parser.add_argument(
+        "--quality-mode",
+        type=str,
+        default=None,
+        choices=["fast", "balanced", "high"],
+        help="Perfil de qualidade (override do config).",
+    )
     parser.add_argument("--fast-mode", action="store_true", help="Modo rápido")
     parser.add_argument("--disable-llm", action="store_true", help="Desabilitar LLM")
     parser.add_argument(
@@ -745,6 +752,7 @@ def main():
             disable_llm=getattr(args, 'disable_llm', False),  # Padrão: False (LLM habilitado)
             load_controlnet=args.use_controlnet,
             load_redux=args.enable_redux,
+            quality_mode=args.quality_mode,
         )
         logger.info("[OK] Pipeline inicializado")
         checkpoint.mark_stage_success("initialization")

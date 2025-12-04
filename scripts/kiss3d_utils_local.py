@@ -468,10 +468,10 @@ def isomer_reconstruct(
         stage1_steps=reconstruction_stage1_steps,
         stage2_steps=reconstruction_stage2_steps,
         # Parâmetros de qualidade melhorados para mesh mais detalhada
-        start_edge_len_stage1=0.08,  # Reduzido de 0.1 para mais detalhes
-        end_edge_len_stage1=0.015,   # Reduzido de 0.02 para mais detalhes
-        start_edge_len_stage2=0.015, # Reduzido de 0.02 para mais detalhes
-        end_edge_len_stage2=0.003,   # Reduzido de 0.005 para mais detalhes
+        start_edge_len_stage1=0.06,  # estabilidade melhor
+        end_edge_len_stage1=0.02,    # evita oversampling
+        start_edge_len_stage2=0.02,  # mais suave
+        end_edge_len_stage2=0.005,   # evita overfitting/extremo
     )
 
     multi_view_mask_proj = mask_fix(multi_view_mask, erode_dilate=-10, blur=5)
