@@ -716,7 +716,18 @@ def main():
     selected_inputs: List[Dict[str, Path]] = []
     dataset_view_arg = str(args.dataset_view) if args.dataset_view is not None else ""
 
-    if args.dataset_item:
+    if args.input:
+        input_path = Path(args.input)
+        if not input_path.is_absolute():
+            input_path = project_root / input_path
+        selected_inputs = [
+            {
+                "label": "input",
+                "path": input_path.resolve(),
+                "display": input_path.stem,
+            }
+        ]
+    elif args.dataset_item:
         available_views = _collect_dataset_views(dataset_root, args.dataset_item)
         if not available_views:
             print(f"[ERRO] Nenhuma imagem encontrada para {args.dataset_item} em {dataset_root / 'images'}.")
@@ -747,21 +758,9 @@ def main():
                 print(f"[INFO] Usando ground-truth padrão do dataset: {args.gt_mesh}")
             else:
                 print("[AVISO] Ground-truth do dataset não encontrado; métricas serão puladas.")
-
-    if not selected_inputs:
-        if not args.input:
-            print("[ERRO] Informe --input ou utilize --dataset-item para selecionar uma amostra.")
-            sys.exit(1)
-        input_path = Path(args.input)
-        if not input_path.is_absolute():
-            input_path = project_root / input_path
-        selected_inputs = [
-            {
-                "label": "input",
-                "path": input_path.resolve(),
-                "display": input_path.stem,
-            }
-        ]
+    else:
+        print("[ERRO] Informe --input ou utilize --dataset-item para selecionar uma amostra.")
+        sys.exit(1)
 
     # Converter caminhos para absolutos
     for job in selected_inputs:

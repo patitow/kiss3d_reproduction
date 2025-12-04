@@ -1281,7 +1281,13 @@ class kiss3d_wrapper(object):
         _empty_cuda_cache()
 
         if save_intermediate_results:
-            bundle_image_rendered = render_3d_bundle_image_from_mesh(save_paths[0])
+            # O renderer espera arquivos OBJ; usar o OBJ exportado quando disponível
+            mesh_for_render = (
+                save_paths[1]
+                if len(save_paths) > 1 and save_paths[1].lower().endswith(".obj") and os.path.exists(save_paths[1])
+                else save_paths[0]
+            )
+            bundle_image_rendered = render_3d_bundle_image_from_mesh(mesh_for_render)
             render_save_path = os.path.join(TMP_DIR, f"{self.uuid}_bundle_render.png")
             torchvision.utils.save_image(bundle_image_rendered, render_save_path)
 
