@@ -23,6 +23,7 @@ if not kiss3dgen_path.exists():
 sys.path.insert(0, str(project_root))
 
 import argparse
+from argparse import BooleanOptionalAction
 import shutil
 import torch
 
@@ -99,9 +100,24 @@ def main():
         default="pipeline/pipeline_config/default.yaml",
         help="Caminho para config YAML (relativo ao diretório Kiss3DGen)",
     )
-    parser.add_argument("--enable-redux", action="store_true", default=True, help="Habilitar Redux")
-    parser.add_argument("--use-mv-rgb", action="store_true", default=True, help="Usar RGB multiview")
-    parser.add_argument("--use-controlnet", action="store_true", default=True, help="Usar ControlNet")
+    parser.add_argument(
+        "--enable-redux",
+        action=BooleanOptionalAction,
+        default=True,
+        help="Habilitar Flux Redux (use --no-enable-redux para desativar)",
+    )
+    parser.add_argument(
+        "--use-mv-rgb",
+        action=BooleanOptionalAction,
+        default=True,
+        help="Usar RGB multiview como referência (use --no-use-mv-rgb para desativar)",
+    )
+    parser.add_argument(
+        "--use-controlnet",
+        action=BooleanOptionalAction,
+        default=True,
+        help="Usar ControlNet (use --no-use-controlnet para desativar)",
+    )
     parser.add_argument("--target-vram", type=float, default=12.0, help="VRAM alvo em GB (default: 12.0)")
     parser.add_argument("--dataset-item", type=str, help="Nome do item em data/raw/gazebo_dataset")
     parser.add_argument("--dataset-root", type=str, default="data/raw/gazebo_dataset", help="Raiz do dataset local")

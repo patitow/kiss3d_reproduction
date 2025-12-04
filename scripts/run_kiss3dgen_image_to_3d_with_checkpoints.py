@@ -396,6 +396,7 @@ logger.info(f"[CUDA] Arquiteturas: {os.environ['TORCH_CUDA_ARCH_LIST']}")
 import json
 import shutil
 import argparse
+from argparse import BooleanOptionalAction
 import traceback
 from typing import Dict, Any, Optional, Tuple
 from datetime import datetime
@@ -657,9 +658,24 @@ def main():
     parser.add_argument("--config", type=str, default="Kiss3DGen/pipeline/pipeline_config/default.yaml")
     parser.add_argument("--fast-mode", action="store_true", help="Modo rápido")
     parser.add_argument("--disable-llm", action="store_true", help="Desabilitar LLM")
-    parser.add_argument("--use-controlnet", action="store_true", help="Usar ControlNet")
-    parser.add_argument("--enable-redux", action="store_true", help="Habilitar Redux")
-    parser.add_argument("--use-mv-rgb", action="store_true", default=True, help="Usar RGB multiview")
+    parser.add_argument(
+        "--use-controlnet",
+        action=BooleanOptionalAction,
+        default=True,
+        help="Usar ControlNet (use --no-use-controlnet para desativar)",
+    )
+    parser.add_argument(
+        "--enable-redux",
+        action=BooleanOptionalAction,
+        default=True,
+        help="Habilitar Redux (use --no-enable-redux para desativar)",
+    )
+    parser.add_argument(
+        "--use-mv-rgb",
+        action=BooleanOptionalAction,
+        default=True,
+        help="Usar RGB multiview (use --no-use-mv-rgb para desativar)",
+    )
     parser.add_argument(
         "--pipeline-mode",
         choices=["multiview", "flux"],

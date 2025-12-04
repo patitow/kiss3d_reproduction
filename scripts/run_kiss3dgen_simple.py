@@ -19,6 +19,7 @@ os.chdir(str(kiss3dgen_path))
 sys.path.insert(0, str(kiss3dgen_path))
 
 import argparse
+from argparse import BooleanOptionalAction
 from pipeline.kiss3d_wrapper import init_wrapper_from_config, run_image_to_3d
 from pipeline.utils import TMP_DIR, OUT_DIR
 import shutil
@@ -29,17 +30,31 @@ def main():
     parser.add_argument('--output', type=str, default='../data/outputs/kiss3dgen', help='Diretorio de saida')
     parser.add_argument('--config', type=str, default='pipeline/pipeline_config/default.yaml', 
                        help='Caminho para config YAML')
-    parser.add_argument('--enable-redux', action='store_true', default=True, help='Habilitar Redux')
-    parser.add_argument('--use-mv-rgb', action='store_true', default=True, help='Usar RGB multiview')
-    parser.add_argument('--use-controlnet', action='store_true', default=True, help='Usar ControlNet')
-    
+    parser.add_argument(
+        '--enable-redux',
+        action=BooleanOptionalAction,
+        default=True,
+        help='Habilitar Redux (use --no-enable-redux para desativar)',
+    )
+    parser.add_argument(
+        '--use-mv-rgb',
+        action=BooleanOptionalAction,
+        default=True,
+        help='Usar RGB multiview (use --no-use-mv-rgb para desativar)',
+    )
+    parser.add_argument(
+        '--use-controlnet',
+        action=BooleanOptionalAction,
+        default=True,
+        help='Usar ControlNet (use --no-use-controlnet para desativar)',
+    )
     args = parser.parse_args()
-    
+
     # Criar diretorios
     os.makedirs(args.output, exist_ok=True)
     os.makedirs(TMP_DIR, exist_ok=True)
     os.makedirs(OUT_DIR, exist_ok=True)
-    
+
     print("=" * 60)
     print("Pipeline IMAGE TO 3D - Kiss3DGen")
     print("=" * 60)
@@ -47,17 +62,17 @@ def main():
     print(f"Output: {args.output}")
     print(f"Config: {args.config}")
     print("=" * 60)
-    
+
     # Verificar se arquivo existe
     if not os.path.exists(args.input):
         print(f"[ERRO] Arquivo nao encontrado: {args.input}")
         return
-    
+
     # Verificar se config existe
     if not os.path.exists(args.config):
         print(f"[ERRO] Config nao encontrado: {args.config}")
         return
-    
+
     # Limpar diretorio temporario
     print("\n[1/4] Limpando diretorio temporario...")
     if os.path.exists(TMP_DIR):

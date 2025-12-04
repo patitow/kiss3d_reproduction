@@ -170,6 +170,16 @@ class kiss3d_wrapper(object):
         self.llm_model = llm_model
         self.llm_tokenizer = llm_tokenizer
         self.fast_mode = fast_mode
+
+        self._seed_value = (
+            config.get("seed")
+            or config.get("flux", {}).get("seed")
+            or config.get("multiview", {}).get("seed")
+            or config.get("reconstruction", {}).get("seed")
+            or 0
+        )
+        self._torch_rng = torch.Generator(device="cpu")
+        self._torch_rng.manual_seed(int(self._seed_value))
         self._recon_stage2 = self.config["reconstruction"].get("stage2_steps", 50)
         fast_default = max(24, self._recon_stage2 // 2)
         self._recon_stage2_fast = min(
@@ -370,6 +380,15 @@ class kiss3d_wrapper(object):
 
         return seed_grid
 
+    def _rng_uniform(self, low: float = 0.0, high: float = 1.0) -> float:
+        span = high - low
+        sample = torch.rand(1, generator=self._torch_rng).item()
+        return low + span * float(sample)
+
+    def _rng_standard_normal(self, shape, device):
+        noise = torch.randn(shape, generator=self._torch_rng)
+        return noise.to(device)
+
     def _generate_seed_variations(
         self,
         base: torch.Tensor,
@@ -390,10 +409,10 @@ class kiss3d_wrapper(object):
                 view = TF.adjust_saturation(view, sat_scale)
 
             if attempt_idx > 0:
-                angle = float((torch.rand(1, device=device).item() - 0.5) * 6.0 * attempt_idx)
+                angle = float((self._rng_uniform(-0.5, 0.5)) * 6.0 * attempt_idx)
                 max_shift = max(1, int(2 * attempt_idx))
-                dx = int((torch.rand(1, device=device).item() - 0.5) * max_shift)
-                dy = int((torch.rand(1, device=device).item() - 0.5) * max_shift)
+                dx = int(self._rng_uniform(-0.5, 0.5) * max_shift)
+                dy = int(self._rng_uniform(-0.5, 0.5) * max_shift)
                 view = TF.affine(
                     view,
                     angle=angle,
@@ -403,14 +422,14 @@ class kiss3d_wrapper(object):
                     interpolation=InterpolationMode.BILINEAR,
                     fill=0.0,
                 )
-                contrast = 1.0 + (torch.rand(1, device=device).item() - 0.5) * 0.3 * attempt_idx
+                contrast = 1.0 + self._rng_uniform(-0.5, 0.5) * 0.3 * attempt_idx
                 view = TF.adjust_contrast(view, contrast)
-                brightness = 1.0 + (torch.rand(1, device=device).item() - 0.5) * 0.25 * attempt_idx
+                brightness = 1.0 + self._rng_uniform(-0.5, 0.5) * 0.25 * attempt_idx
                 view = TF.adjust_brightness(view, brightness)
 
             if noise_strength > 0:
                 jitter = noise_strength * max(1, attempt_idx + 1)
-                noise = torch.randn_like(view) * jitter
+                noise = self._rng_standard_normal(view.shape, device=view.device) * jitter
                 view = (view + noise).clamp(0.0, 1.0)
 
             variations.append(view.clamp(0.0, 1.0))
@@ -439,6 +458,22 @@ class kiss3d_wrapper(object):
 
         bundle[:, :, target_h:, :] = normals_grid.unsqueeze(0)
         return bundle
+
+    def _mask_from_normals(self, normals: torch.Tensor, threshold: float = 0.05) -> torch.Tensor:
+        magnitude = torch.linalg.norm(normals, dim=1, keepdim=True)
+        mask = (magnitude > threshold).float()
+        mask = F.avg_pool2d(mask, kernel_size=5, stride=1, padding=2)
+        return (mask > 0.25).float()
+
+    def _format_multiview_prompt(self, caption: str) -> str:
+        instructions = (
+            "Create a 2x4 multi-view atlas of a single object. "
+            "Top row (left to right): front, right, back, left RGB renders on a white background. "
+            "Bottom row repeats the same order but shows the corresponding surface normal maps. "
+            "Keep the subject centered, same scale in every tile, no props or shadows. "
+            f"Object description: {caption}"
+        )
+        return instructions
 
     def _move_mesh_to_device(self, vertices, faces, device):
         def _to_tensor(data):
@@ -899,19 +934,22 @@ class kiss3d_wrapper(object):
         self.offload_multiview_pipeline()
 
         rgb_source = rgb_multi_view.squeeze(0) if use_mv_rgb else lrm_multi_view_rgb
-        rgb_views = rgb_source
-        if rgb_views.shape[0] < 4:
-            raise RuntimeError(f"Esperado ao menos 4 vistas do Zero123++, recebido {rgb_views.shape[0]}")
+        if rgb_source.shape[0] < 4:
+            raise RuntimeError(f"Esperado ao menos 4 vistas do Zero123++, recebido {rgb_source.shape[0]}")
 
         view_order = [3, 0, 1, 2]
-        rgb_views = rgb_views[view_order].to(recon_device)
+        rgb_views = rgb_source[view_order].to(recon_device)
 
-        normal_views = lrm_multi_view_normals[view_order]
-        normal_views = ((normal_views + 1.0) / 2.0).clamp(0.0, 1.0).to(recon_device)
+        raw_normal_views = lrm_multi_view_normals[view_order].to(recon_device)
+        normal_views = ((raw_normal_views + 1.0) / 2.0).clamp(0.0, 1.0)
 
-        from utils.tool import get_background
+        multi_view_mask = self._mask_from_normals(raw_normal_views)
+        if torch.all(multi_view_mask <= 0):
+            from utils.tool import get_background
 
-        multi_view_mask = get_background(normal_views.cpu()).to(recon_device)
+            multi_view_mask = get_background(normal_views.cpu()).to(recon_device)
+        else:
+            multi_view_mask = multi_view_mask.to(recon_device)
         rgb_views = rgb_views * multi_view_mask + (1 - multi_view_mask)
 
         vertices, faces = self._move_mesh_to_device(vertices, faces, recon_device)
@@ -960,6 +998,7 @@ class kiss3d_wrapper(object):
         use_mv_rgb: bool = True,
     ):
         flux_device = self.config["flux"].get("device", "cpu")
+        prompt_text = self._format_multiview_prompt(caption)
 
         reference_bundle = None
         reference_path = None
@@ -1015,6 +1054,8 @@ class kiss3d_wrapper(object):
             return seq
 
         control_reference = reference_bundle if reference_bundle is not None else flux_seed
+        if reference_bundle is None:
+            logger.warning("[FLUX] Bundle de referência indisponível; ControlNet usará seed sintético.")
 
         if use_controlnet and self.flux_pipeline and hasattr(self.flux_pipeline, "controlnet"):
             control_mode = flux_cfg.get("controlnet_modes", ["tile"])
@@ -1052,7 +1093,7 @@ class kiss3d_wrapper(object):
             ]
 
             bundle_tensor, bundle_path = self.generate_3d_bundle_image_controlnet(
-                prompt=caption,
+                prompt=prompt_text,
                 image=flux_seed,
                 strength=0.95,
                 control_image=control_images,
@@ -1065,7 +1106,7 @@ class kiss3d_wrapper(object):
             )
         else:
             bundle_tensor, bundle_path = self.generate_3d_bundle_image_text(
-                prompt=caption,
+                prompt=prompt_text,
                 image=flux_seed,
                 strength=0.95,
                 lora_scale=1.0,
@@ -1428,7 +1469,10 @@ class kiss3d_wrapper(object):
         
         # Gerar máscara de background
         recon_device = self.config["reconstruction"].get("device", "cpu")
-        multi_view_mask = get_background(normal_multi_view).to(recon_device)
+        raw_normals_from_bundle = (normal_multi_view * 2.0) - 1.0
+        multi_view_mask = self._mask_from_normals(raw_normals_from_bundle.to(recon_device))
+        if torch.all(multi_view_mask <= 0):
+            multi_view_mask = get_background(normal_multi_view).to(recon_device)
         rgb_multi_view = rgb_multi_view.to(recon_device) * multi_view_mask + (1 - multi_view_mask)
 
         vertices, faces = [], []
