@@ -47,9 +47,10 @@ class OptimizedKiss3DWrapper:
     para GPUs com 12GB de VRAM.
     """
     
-    def __init__(self, config_path: str, target_vram_gb: float = 12.0):
+    def __init__(self, config_path: str, target_vram_gb: float = 12.0, quality_mode: str | None = None):
         self.config_path = config_path
         self.target_vram_gb = target_vram_gb
+        self.quality_mode = quality_mode
         self.wrapper: Optional[kiss3d_wrapper] = None
         self._models_loaded = {
             'flux': False,
@@ -132,6 +133,7 @@ class OptimizedKiss3DWrapper:
             disable_llm=False,  # Manter LLM mas em CPU
             load_controlnet=True,
             load_redux=True,
+            quality_mode=self.quality_mode,
         )
         logger.info("Wrapper carregado.")
     
@@ -373,7 +375,11 @@ class OptimizedKiss3DWrapper:
         logger.info("Cleanup completo.")
 
 
-def init_optimized_wrapper(config_path: str, target_vram_gb: float = 12.0) -> OptimizedKiss3DWrapper:
+def init_optimized_wrapper(
+    config_path: str,
+    target_vram_gb: float = 12.0,
+    quality_mode: str | None = None,
+) -> OptimizedKiss3DWrapper:
     """Inicializa wrapper otimizado."""
-    return OptimizedKiss3DWrapper(config_path, target_vram_gb)
+    return OptimizedKiss3DWrapper(config_path, target_vram_gb, quality_mode)
 

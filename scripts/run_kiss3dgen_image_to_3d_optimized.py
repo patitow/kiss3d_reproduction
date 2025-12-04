@@ -284,6 +284,7 @@ def main():
         k3d_wrapper = init_optimized_wrapper(
             args.config,
             target_vram_gb=args.target_vram,
+            quality_mode=args.quality_mode,
         )
         log_vram_usage("Após inicializar")
         print("[OK] Pipeline inicializado (modo otimizado)")

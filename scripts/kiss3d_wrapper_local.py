@@ -483,6 +483,84 @@ class kiss3d_wrapper(object):
         mask = F.avg_pool2d(mask, kernel_size=5, stride=1, padding=2)
         return (mask > 0.25).float()
 
+    def _apply_reference_normals_smart(
+        self,
+        bundle_tensor: torch.Tensor,
+        blend_factor: float = 0.8,
+    ) -> torch.Tensor:
+        if self._last_reference_normal_views is None:
+            return bundle_tensor
+
+        bundle = bundle_tensor.clone()
+        _, _, h, w = bundle.shape
+        target_h = h // 2
+
+        flux_normals_row = bundle[:, :, target_h:, :]
+
+        ref_normals = self._last_reference_normal_views.clone()
+        ref_normals = F.normalize(ref_normals, p=2, dim=1)
+        ref_normals_01 = (ref_normals + 1.0) / 2.0
+
+        ref_normals_resized = F.interpolate(
+            ref_normals_01.unsqueeze(0),
+            size=(target_h, w // 4),
+            mode="bilinear",
+            align_corners=False,
+        )
+
+        ref_normals_grid = torch.cat(
+            [
+                ref_normals_resized[:, :, i : i + 1, :]
+                for i in range(0, ref_normals_resized.shape[2], target_h)
+            ],
+            dim=3,
+        )
+
+        flux_magnitude = torch.linalg.norm(flux_normals_row, dim=1, keepdim=True)
+        ref_magnitude = torch.linalg.norm(ref_normals_grid, dim=1, keepdim=True)
+
+        ref_better = (torch.abs(ref_magnitude - 1.0) < torch.abs(flux_magnitude - 1.0)).float()
+        blended_normals = blend_factor * ref_better * ref_normals_grid + (1.0 - blend_factor * ref_better) * flux_normals_row
+
+        bundle[:, :, target_h:, :] = blended_normals
+        return bundle
+
+    def _validate_bundle_quality(
+        self,
+        bundle_tensor: torch.Tensor,
+        min_quality_score: float = 0.6,
+    ) -> tuple[bool, float, str]:
+        rgb_row = bundle_tensor[:, :, : bundle_tensor.shape[2] // 2, :]
+        normal_row = bundle_tensor[:, :, bundle_tensor.shape[2] // 2 :, :]
+
+        rgb_std = rgb_row.std().item()
+        if rgb_std < 0.05:
+            return False, 0.0, f"Bundle RGB muito uniforme (std={rgb_std:.3f})"
+
+        normal_magnitude = torch.linalg.norm(normal_row, dim=1)
+        valid_normals_ratio = (normal_magnitude > 0.5).float().mean().item()
+        if valid_normals_ratio < 0.3:
+            return False, 0.0, f"Poucas normais válidas ({valid_normals_ratio*100:.1f}%)"
+
+        views = rearrange(rgb_row, "c (n h) (m w) -> (n m) c h w", n=1, m=4)
+        similarities = []
+        for i in range(4):
+            for j in range(i + 1, 4):
+                sim = F.cosine_similarity(views[i].flatten(), views[j].flatten(), dim=0).item()
+                similarities.append(sim)
+        avg_similarity = float(np.mean(similarities)) if similarities else 0.0
+        if avg_similarity > 0.95:
+            return False, 0.0, f"Vistas muito similares (similarity={avg_similarity:.3f})"
+
+        quality_score = (
+            0.3 * min(1.0, rgb_std / 0.2)
+            + 0.3 * valid_normals_ratio
+            + 0.4 * (1.0 - min(1.0, avg_similarity / 0.9))
+        )
+        if quality_score < min_quality_score:
+            return False, quality_score, f"Score de qualidade baixo ({quality_score:.3f} < {min_quality_score})"
+        return True, quality_score, "Bundle válido"
+
     def _generate_robust_mask(
         self,
         rgb_multi_view: torch.Tensor,
@@ -1001,6 +1079,18 @@ class kiss3d_wrapper(object):
             multi_view_mask = get_background(normal_views.cpu()).to(recon_device)
         rgb_views = rgb_views * multi_view_mask + (1 - multi_view_mask)
 
+        # Validação de bundle (multiview)
+        bundle_tensor = torchvision.utils.make_grid(
+            torch.cat([rgb_views.cpu(), normal_views.cpu()], dim=0),
+            nrow=4,
+            padding=0,
+        ).unsqueeze(0)
+        is_valid_mv, quality_mv, msg_mv = self._validate_bundle_quality(bundle_tensor)
+        if not is_valid_mv:
+            logger.warning("[MV] Bundle multiview de baixa qualidade (%s)", msg_mv)
+        else:
+            logger.info("[MV] Bundle multiview validado (score=%.3f)", quality_mv)
+
         vertices, faces = self._move_mesh_to_device(vertices, faces, recon_device)
 
         stage1_steps = max(25, int(reconstruction_stage2_steps * 0.4))
@@ -1167,6 +1257,16 @@ class kiss3d_wrapper(object):
             )
 
         bundle_tensor = self._apply_reference_normals(bundle_tensor)
+        bundle_tensor = self._apply_reference_normals_smart(bundle_tensor)
+
+        is_valid, quality_score, msg = self._validate_bundle_quality(bundle_tensor)
+        if not is_valid and reference_bundle is not None:
+            logger.warning("[FLUX] Bundle de baixa qualidade (%s). Reutilizando bundle de referência Zero123++.", msg)
+            bundle_tensor = reference_bundle
+        elif not is_valid:
+            logger.warning("[FLUX] Bundle de baixa qualidade (%s). Prosseguindo com o bundle gerado.", msg)
+        else:
+            logger.info("[FLUX] Bundle validado (score=%.3f)", quality_score)
 
         self.offload_flux_pipelines()
         return bundle_tensor, bundle_path
