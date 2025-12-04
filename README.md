@@ -43,6 +43,16 @@ O projeto segue o seguinte pipeline:
 3. **Inicialização da Malha**: Criação da malha inicial usando LRM ou Sphere init (InstantMesh)
 4. **Refinamento da Malha**: Melhoria da malha usando ControlNet-Tile e ControlNet-Normal + texto descritivo detalhado gerado pelo LLM
 
+## ⚠️ Escopo: Somente Inferência
+
+Este projeto **não** inclui scripts de treinamento nem pretende reentreinar Flux, Zero123++, LRM ou ISOMER. A ausência de etapas de treino é deliberada pelos seguintes motivos técnicos:
+
+- Os modelos usados aqui dependem de checkpoints proprietários liberados pelos autores originais; o processo de treinamento requer múltiplas GPUs de 80 GB e pipelines distribuídos indisponíveis no contexto acadêmico deste trabalho.
+- A infraestrutura necessária envolve datasets proprietários (por exemplo, multi-view com calibração precisa) e pipelines de renderização diferenciáveis que excedem em custo compute e armazenamento o escopo desta disciplina.
+- O objetivo do estudo é **integrar** e **orquestrar** a inferência de modelos pré-treinados, avaliando ajustes de pipeline, controle de VRAM e checkpoints intermediários.  
+
+Portanto, toda a documentação, scripts e automações aqui disponibilizados retomam exclusivamente a etapa de **inferência/reconstrução**. Qualquer tentativa de treinamento completo deve ser feita diretamente nos repositórios originais dos modelos citados.
+
 ## 🚀 Instalação
 
 ## ⚙️ Ambiente e Dependências
@@ -79,6 +89,21 @@ D:\Visao_Computacional\2025_2\
 ```
 
 Se quiser trabalhar fora desta estrutura, mantenha a variável `PROJECT_ROOT` apontando para a pasta que contém `Kiss3DGen/`.
+
+> **Obrigatório:** o pipeline depende do nosso fork mantido em [patitow/Kiss3DGen-article-reproduction](https://github.com/patitow/Kiss3DGen-article-reproduction). Ele contém correções aplicadas neste trabalho (ex.: `kiss3d_wrapper_local.py`, diffs em `custom_diffusers/`, ajustes de checkpoints) e não é equivalente ao repositório upstream.
+
+Clone e fixe exatamente o commit usado nesta submissão:
+
+```powershell
+cd D:\Visao_Computacional\2025_2
+git clone https://github.com/patitow/Kiss3DGen-article-reproduction.git Kiss3DGen
+cd Kiss3DGen
+git checkout 47689286702cff5ead569e669b009fbf7671f953
+git remote add upstream https://github.com/EnVision-Research/Kiss3DGen.git
+cd ..
+```
+
+> O diretório `Kiss3DGen/` deve ficar lado a lado com este repositório. Os scripts Python assumem esse caminho ao adicionar módulos no `PYTHONPATH`.
 
 ### Modelos necessários
 
@@ -177,6 +202,44 @@ cd ..
 # 8. Pré-compilar nvdiffrast (opcional mas recomendado)
 python scripts/precompile_nvdiffrast.py --clean
 ```
+
+## ✅ Passo a passo 100% reprodutível
+
+1. **Clonar os repositórios**
+   - `git clone https://github.com/<seu-usuario>/mesh3d-generator.git`
+   - `git clone https://github.com/patitow/Kiss3DGen-article-reproduction.git Kiss3DGen && cd Kiss3DGen && git checkout 47689286702cff5ead569e669b009fbf7671f953 && cd ..`
+2. **Criar e ativar o ambiente Python 3.11.9**  
+   `python3.11 -m venv mesh3d-generator-py3.11`  
+   `.\mesh3d-generator-py3.11\Scripts\activate`
+3. **Instalar PyTorch com suporte à sua GPU**  
+   `pip install torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 --index-url https://download.pytorch.org/whl/cu121`
+4. **Instalar dependências Python deste repositório**  
+   `pip install -r requirements.txt`
+5. **Instalar dependências não-padrão**  
+   - `pip install git+https://github.com/NVlabs/nvdiffrast`  
+   - `pip install "git+https://github.com/facebookresearch/pytorch3d.git@stable"`  
+   - `cd Kiss3DGen && pip install -e custom_diffusers/ && cd ..`
+6. **Autenticar na HuggingFace (obrigatório para FLUX/ControlNet/Florence)**  
+   `huggingface-cli login`
+7. **Baixar modelos e checkpoints do pipeline**  
+   ```
+   python scripts/download_models.py
+   python scripts/download_redux.py   # opcional
+   python scripts/download_lrm.py     # traz checkpoints do LRM se ainda não tiver
+   ```
+8. **(Opcional) Pré-compilar extensões CUDA**  
+   `python scripts/precompile_nvdiffrast.py --clean`
+9. **Executar inferência (exemplo imagem→3D)**  
+   ```powershell
+   python scripts/run_kiss3dgen_image_to_3d.py `
+       --input "data/inputs/bottle.png" `
+       --output "outputs/bottle_generation" `
+       --config "pipeline_config/default.yaml" `
+       --pipeline-mode flux `
+       --enable-redux `
+       --use-controlnet `
+       --use-mv-rgb
+   ```
 
 ## 📁 Estrutura do Projeto
 
