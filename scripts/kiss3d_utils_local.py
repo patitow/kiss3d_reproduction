@@ -136,6 +136,89 @@ TMP_DIR = str(TMP_DIR_PATH)
 rembg_session = rembg.new_session("isnet-general-use")
 normal_transfer = NormalTransfer()
 
+COLOR_COMPRESSED_RANGE = (0.2, 0.8)
+COLOR_RANGE_SLACK = 0.05
+
+
+def _log_color_stats(tag: str, colors: np.ndarray | None) -> None:
+    """
+    Registra estatísticas de cores para validação do pipeline.
+    """
+    if colors is None:
+        logger.info("[COLOR_STATS] %s: <none>", tag)
+        return
+
+    arr = np.asarray(colors)
+    if arr.size == 0:
+        logger.info("[COLOR_STATS] %s: empty array", tag)
+        return
+
+    if arr.ndim == 1:
+        arr = arr[:, None]
+
+    flat = arr.reshape(-1, arr.shape[-1])
+    ch_min = flat.min(axis=0)
+    ch_max = flat.max(axis=0)
+    ch_mean = flat.mean(axis=0)
+    logger.info(
+        "[COLOR_STATS] %s: dtype=%s shape=%s min=%s max=%s mean=%s global_min=%.6f global_max=%.6f",
+        tag,
+        arr.dtype,
+        arr.shape,
+        np.round(ch_min, 6),
+        np.round(ch_max, 6),
+        np.round(ch_mean, 6),
+        float(flat.min()),
+        float(flat.max()),
+    )
+
+
+def _restore_color_dynamic_range(
+    colors: np.ndarray,
+    compressed_range: tuple[float, float] = COLOR_COMPRESSED_RANGE,
+    slack: float = COLOR_RANGE_SLACK,
+) -> np.ndarray:
+    """
+    Detecta cores comprimidas (ex.: [0.2, 0.8]) e reexpande para [0, 1].
+    Retorna sempre uma nova cópia float32 em [0, 1].
+    """
+    if colors is None:
+        return None
+
+    colors_np = np.asarray(colors, dtype=np.float32)
+    needs_255_normalization = colors_np.max() > 1.0 + slack
+    if needs_255_normalization:
+        colors_np = colors_np / 255.0
+        logger.debug("[COLOR_FIX] Normalizando cores de 0-255 para 0-1 antes do ajuste.")
+    if colors_np.size == 0 or colors_np.shape[-1] not in (3, 4):
+        return colors_np
+
+    corrected = colors_np.copy()
+    flat = corrected.reshape(-1, corrected.shape[-1])
+    ch_min = flat.min(axis=0)
+    ch_max = flat.max(axis=0)
+    approx_lo, approx_hi = compressed_range
+    approx_span = max(approx_hi - approx_lo, 1e-5)
+    span = np.maximum(ch_max - ch_min, 1e-5)
+    needs_rescale = False
+
+    if np.all(ch_min >= (approx_lo - slack)) and np.all(ch_max <= (approx_hi + slack)):
+        corrected = (corrected - approx_lo) / approx_span
+        needs_rescale = True
+    elif np.any(span < 0.9):
+        view_shape = (1,) * (corrected.ndim - 1) + (corrected.shape[-1],)
+        corrected = (corrected - ch_min.reshape(view_shape)) / span.reshape(view_shape)
+        needs_rescale = True
+
+    np.clip(corrected, 0.0, 1.0, out=corrected)
+    if needs_rescale:
+        logger.debug(
+            "[COLOR_FIX] Reexpandindo cores comprimidas: min=%s, max=%s",
+            ch_min,
+            ch_max,
+        )
+    return corrected
+
 
 def evaluate_mesh_against_gt(
     pred_mesh_path: str | Path,
@@ -243,7 +326,18 @@ def lrm_reconstruct(
         )
     else:
         vertices, faces, vertex_colors = mesh_out
-        save_obj(vertices, faces, vertex_colors, mesh_path_idx)
+        def _to_numpy(data):
+            if isinstance(data, torch.Tensor):
+                return data.detach().cpu().numpy()
+            return data
+
+        vertices_np = _to_numpy(vertices)
+        faces_np = _to_numpy(faces)
+        raw_colors_np = _to_numpy(vertex_colors)
+        _log_color_stats("LRM.vertex_colors.raw", raw_colors_np)
+        colors_np = _restore_color_dynamic_range(raw_colors_np)
+        _log_color_stats("LRM.vertex_colors.restored", colors_np)
+        save_obj(vertices_np, faces_np, colors_np, mesh_path_idx)
     logger.info(f"Mesh saved to {mesh_path_idx}")
 
     if render_3d_bundle_image:
@@ -505,8 +599,8 @@ def fix_vert_color_glb(mesh_path):
 def save_py3dmesh_with_trimesh_fast_local(
     meshes, 
     save_glb_path, 
-    apply_sRGB_to_LinearRGB=True,
-    use_uv_texture=True,
+    apply_sRGB_to_LinearRGB=False,
+    use_uv_texture=False,
     texture_resolution=2048
 ):
     """
@@ -526,6 +620,9 @@ def save_py3dmesh_with_trimesh_fast_local(
     vertices = meshes.verts_packed().cpu().float().numpy()
     triangles = meshes.faces_packed().cpu().long().numpy()
     np_color = meshes.textures.verts_features_packed().cpu().float().numpy()
+    _log_color_stats("ISOMER.vertex_colors.raw", np_color)
+    np_color = _restore_color_dynamic_range(np_color)
+    _log_color_stats("ISOMER.vertex_colors.restored", np_color)
     
     if save_glb_path.endswith(".glb"):
         # Rotacionar 180 graus ao longo do eixo Y
@@ -538,8 +635,14 @@ def save_py3dmesh_with_trimesh_fast_local(
     assert np_color.shape[1] == 3, f"Colors must be RGB, got shape {np_color.shape}"
     assert 0 <= np_color.min() and np_color.max() <= 1, f"Colors out of range: min={np_color.min()}, max={np_color.max()}"
     
-    # Clamp colors
+    # Clamp colors e converte para RGBA (uint8) para preservar saturação
     np_color = np.clip(np_color, 0, 1)
+    rgba_colors = np.concatenate(
+        [np_color, np.ones((np_color.shape[0], 1), dtype=np_color.dtype)],
+        axis=1,
+    )
+    rgba_colors = (rgba_colors * 255).astype(np.uint8)
+    _log_color_stats("ISOMER.vertex_colors.rgba_uint8", rgba_colors)
     
     # Tentar criar textura UV se solicitado e for GLB
     if use_uv_texture and save_glb_path.endswith(".glb"):
@@ -575,19 +678,19 @@ def save_py3dmesh_with_trimesh_fast_local(
             except Exception as e:
                 logger.warning(f"Falha ao criar textura UV, usando vertex colors: {e}")
                 # Fallback para vertex colors
-                mesh = trimesh.Trimesh(vertices=vertices, faces=triangles, vertex_colors=np_color)
+                mesh = trimesh.Trimesh(vertices=vertices, faces=triangles, vertex_colors=rgba_colors)
                 mesh.remove_unreferenced_vertices()
                 mesh.export(save_glb_path)
                 
         except Exception as e:
             logger.warning(f"Erro ao processar mesh com textura, usando método básico: {e}")
             # Fallback completo
-            mesh = trimesh.Trimesh(vertices=vertices, faces=triangles, vertex_colors=np_color)
+            mesh = trimesh.Trimesh(vertices=vertices, faces=triangles, vertex_colors=rgba_colors)
             mesh.remove_unreferenced_vertices()
             mesh.export(save_glb_path)
     else:
         # Usar vertex colors (comportamento original)
-        mesh = trimesh.Trimesh(vertices=vertices, faces=triangles, vertex_colors=np_color)
+        mesh = trimesh.Trimesh(vertices=vertices, faces=triangles, vertex_colors=rgba_colors)
         mesh.remove_unreferenced_vertices()
         mesh.export(save_glb_path)
     
