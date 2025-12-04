@@ -84,12 +84,13 @@ Se quiser trabalhar fora desta estrutura, mantenha a variável `PROJECT_ROOT` ap
 
 | Modelo                         | Origem                                  | Destino                                                     |
 |-------------------------------|-----------------------------------------|-------------------------------------------------------------|
-| `flux1-dev-fp8.safetensors`   | HuggingFace (`./models/flux1-dev-fp8`)   | `models/` na raiz                                           |
+| `flux1-dev-fp8.safetensors`   | HuggingFace                             | `models/`                                                   |
 | ControlNet (`Union`)          | HuggingFace                             | `checkpoint/flux_controlnet/`                               |
-| `Zero123++` + UNet custom     | Release oficial Kiss3DGen               | `models/zero123plus/`                                       |
+| LoRA Redux (`Flux.1-Redux`)   | HuggingFace                             | `checkpoint/flux_lora/`                                     |
+| `Zero123++` + UNet custom     | Release Kiss3DGen                       | `models/zero123plus/`                                       |
 | `LRM final_ckpt.ckpt`         | Release LRM                             | `Kiss3DGen/checkpoint/lrm/`                                 |
-| `Florence-2 large no flash`   | HuggingFace                             | baixado automaticamente em `Kiss3DGen/.cache/`              |
-| `ISOMER` assets               | Incluso no repo                         | `Kiss3DGen/models/ISOMER/`                                  |
+| `Florence-2 large no flash`   | HuggingFace                             | cache automático em `Kiss3DGen/.cache/`                     |
+| Assets ISOMER / nvdiffrast    | Incluídos                               | `Kiss3DGen/models/ISOMER/`                                  |
 
 Use `python scripts/download_models.py` para Flux/ControlNet/Zero123, e `python scripts/download_lrm.py` para o LRM. Verifique se os diretórios aparecem conforme tabela.
 
@@ -100,7 +101,6 @@ Use `python scripts/download_models.py` para Flux/ControlNet/Zero123, e `python 
 | `renderutils_plugin` recompila a cada run e falha com `LNK1104` | plugin tenta re-linkar dentro de `%APPDATA%` sem permissões | Defina `TORCH_EXTENSIONS_DIR=D:\...\torch_extensions_cache` e pré-compile com `python scripts/precompile_nvdiffrast.py --clean`. Se falhar, copie manualmente `renderutils_plugin.pyd` liberado pelo time para `mesh3d-generator-py3.11\Lib\site-packages`. |
 | Objetos saem dessaturados (tons de cinza) | LRM gera vertex colors em float 0–1 e o export/clamp estava convertendo indevidamente | Atualizamos `save_py3dmesh_with_trimesh_fast_local` para preservar sRGB e exportar RGBA uint8. Se ainda notar cores lavadas, verifique `outputs/tmp/*_recon_from_kiss3d.png`: se já estiverem cinza, o problema vem do bundle (revise a imagem de entrada/caption). |
 | VRAM insuficiente / OOM | `pipeline_mode=flux` carrega Flux+ControlNet+Zero123++/LRM simultaneamente | Use `--fast-mode` (desativa Redux/ControlNet e libera VRAM agressivamente), reduza `num_inference_steps`, ou opere em `--pipeline-mode multiview`. |
-| `KeyboardInterrupt` durante o Flux Transformer | Offload automático do `accelerate` demora muito com pouca RAM | Certifique-se de ter 32 GB+ de RAM e feche aplicações pesadas. |
 
 ### Fluxo completo de instalação (Windows)
 
@@ -141,6 +141,8 @@ python scripts/setup_huggingface_auth.py
 python scripts/download_models.py
 python scripts/download_redux.py  # Opcional
 python scripts/download_lrm.py   # Opcional
+# 9. Pré-compilar renderutils_plugin (nvdiffrast)
+python scripts/precompile_nvdiffrast.py --clean
 ```
 
 #### Setup Manual
@@ -172,6 +174,8 @@ pip install "git+https://github.com/facebookresearch/pytorch3d.git@stable"
 cd Kiss3DGen
 pip install -e custom_diffusers/
 cd ..
+# 8. Pré-compilar nvdiffrast (opcional mas recomendado)
+python scripts/precompile_nvdiffrast.py --clean
 ```
 
 ## 📁 Estrutura do Projeto
@@ -216,6 +220,47 @@ mesh3d-generator/
 ├── PLANNING.md
 └── .gitignore
 ```
+
+## 🏃‍♀️ Executando o Pipeline
+
+### Um único objeto (imagem local)
+
+```powershell
+.\mesh3d-generator-py3.11\Scripts\python.exe scripts\run_kiss3dgen_image_to_3d.py `
+    --input "data/inputs/bottle.png" `
+    --output "outputs/bottle_generation" `
+    --config "pipeline_config/default.yaml" `
+    --pipeline-mode flux `
+    --enable-redux `
+    --use-controlnet `
+    --use-mv-rgb
+```
+
+Parâmetros úteis:
+
+- `--fast-mode`: reduz consumo de VRAM (desliga Redux/ControlNet e força limpeza agressiva de modelos).
+- `--pipeline-mode multiview`: usa Zero123++ diretamente (sem Flux), exigindo menos VRAM porém com menos fidelidade.
+- `--dataset-item` / `--dataset-view`: seleciona imagens prontas em `data/raw/gazebo_dataset/images`.
+- `--dataset-plan`: executa um YAML com vários objetos em sequência.
+- `--gt-mesh`: fornece mesh de referência para cálculo automático de Chamfer/F-score.
+
+Resultados:
+
+- `outputs/<uuid>.obj/.glb`: mesh direto do LRM (sem ISOMER) — usa vertex colors preservados e é o fallback quando o nvdiffrast falha.
+- `outputs/<uuid>_isomer.obj/.glb`: mesh refinado pelo ISOMER (necessita `renderutils_plugin` funcional).
+- `outputs/tmp/`: contém bundles intermediários (`*_flux_seed_bundle.png`, `*_generated_bundle.png`, `*_recon_from_kiss3d.png`) usados para depuração de cores.
+
+### Batch com vários objetos (dataset plan)
+
+```powershell
+python scripts/run_kiss3dgen_image_to_3d.py `
+    --dataset-plan pipeline_config/flux_top10_dataset.yaml `
+    --output outputs/flux_top10_dataset `
+    --pipeline-mode flux `
+    --fast-mode
+```
+
+Cada entrada do YAML gera um diretório em `outputs/<name>_<uuid>/views/*` e um `runs_report.json` com métricas ordenadas. Use essa abordagem para processar o dataset do Gazebo ou qualquer CSV/YAML próprio (basta apontar `--dataset-root`).
 
 ## 📅 Schedule e Timeline
 
