@@ -45,14 +45,66 @@ O projeto segue o seguinte pipeline:
 
 ## 🚀 Instalação
 
-### Pré-requisitos
+## ⚙️ Ambiente e Dependências
 
-- **Python 3.11.9** (OBRIGATÓRIO - não use outras versões)
-- CUDA 11.8 ou 12.1 (para GPU NVIDIA)
-- Visual Studio C++ Build Tools (Windows - para compilar nvdiffrast)
-- Conta HuggingFace autenticada (para baixar modelos Flux)
+### Requisitos mínimos de hardware
 
-### Setup Rápido (Windows)
+| Recurso | Mínimo | Recomendado |
+|---------|--------|-------------|
+| GPU      | 12 GB VRAM (RTX 3060 Ti / 4070) | 24 GB+ (RTX 4090 / A6000) |
+| RAM      | 32 GB                          | 64 GB+                    |
+| Disco    | 60 GB livres (modelos + cache) | 120 GB                    |
+
+> **Atenção**: o pipeline carrega múltiplos modelos (Flux, ControlNet, Zero123++, LRM, ISOMER, Florence-2). Com 12 GB de VRAM é obrigatório usar `--fast-mode` (ativa offload agressivo e reduz steps). Em VRAM menores que 10 GB o pipeline Flux não cabe.
+
+### Pré-requisitos de software
+
+- **Python 3.11.9** (OBRIGATÓRIO)
+- **CUDA Toolkit 12.4** (funciona com 12.1/12.2; 11.x não é suportado pela versão atual do FLUX)
+- **Visual Studio Build Tools 2019** (componentes “Desktop development with C++” para compilar `renderutils_plugin`)
+- **Ninja** (já incluído no repositório, mas mantenha no `PATH` para garantir)
+- **Conta HuggingFace** autenticada (`huggingface-cli login`)
+- **Git LFS** para baixar checkpoints grandes
+
+### Repositórios necessários
+
+Este projeto incorpora o **Kiss3DGen** como submódulo/pasta. A organização recomendada:
+
+```
+D:\Visao_Computacional\2025_2\
+├── mesh3d-generator (este repo)
+├── Kiss3DGen (já incluso dentro de mesh3d-generator/Kiss3DGen)
+└── data\
+    └── raw\gazebo_dataset\images\*.jpg  # dataset local
+```
+
+Se quiser trabalhar fora desta estrutura, mantenha a variável `PROJECT_ROOT` apontando para a pasta que contém `Kiss3DGen/`.
+
+### Modelos necessários
+
+| Modelo                         | Origem                                  | Destino                                                     |
+|-------------------------------|-----------------------------------------|-------------------------------------------------------------|
+| `flux1-dev-fp8.safetensors`   | HuggingFace (`./models/flux1-dev-fp8`)   | `models/` na raiz                                           |
+| ControlNet (`Union`)          | HuggingFace                             | `checkpoint/flux_controlnet/`                               |
+| `Zero123++` + UNet custom     | Release oficial Kiss3DGen               | `models/zero123plus/`                                       |
+| `LRM final_ckpt.ckpt`         | Release LRM                             | `Kiss3DGen/checkpoint/lrm/`                                 |
+| `Florence-2 large no flash`   | HuggingFace                             | baixado automaticamente em `Kiss3DGen/.cache/`              |
+| `ISOMER` assets               | Incluso no repo                         | `Kiss3DGen/models/ISOMER/`                                  |
+
+Use `python scripts/download_models.py` para Flux/ControlNet/Zero123, e `python scripts/download_lrm.py` para o LRM. Verifique se os diretórios aparecem conforme tabela.
+
+### Issues conhecidas / falhas esperadas
+
+| Sintoma | Causa | Mitigação |
+|---------|-------|-----------|
+| `renderutils_plugin` recompila a cada run e falha com `LNK1104` | plugin tenta re-linkar dentro de `%APPDATA%` sem permissões | Defina `TORCH_EXTENSIONS_DIR=D:\...\torch_extensions_cache` e pré-compile com `python scripts/precompile_nvdiffrast.py --clean`. Se falhar, copie manualmente `renderutils_plugin.pyd` liberado pelo time para `mesh3d-generator-py3.11\Lib\site-packages`. |
+| Objetos saem dessaturados (tons de cinza) | LRM gera vertex colors em float 0–1 e o export/clamp estava convertendo indevidamente | Atualizamos `save_py3dmesh_with_trimesh_fast_local` para preservar sRGB e exportar RGBA uint8. Se ainda notar cores lavadas, verifique `outputs/tmp/*_recon_from_kiss3d.png`: se já estiverem cinza, o problema vem do bundle (revise a imagem de entrada/caption). |
+| VRAM insuficiente / OOM | `pipeline_mode=flux` carrega Flux+ControlNet+Zero123++/LRM simultaneamente | Use `--fast-mode` (desativa Redux/ControlNet e libera VRAM agressivamente), reduza `num_inference_steps`, ou opere em `--pipeline-mode multiview`. |
+| `KeyboardInterrupt` durante o Flux Transformer | Offload automático do `accelerate` demora muito com pouca RAM | Certifique-se de ter 32 GB+ de RAM e feche aplicações pesadas. |
+
+### Fluxo completo de instalação (Windows)
+
+#### Setup Rápido
 
 ```powershell
 # 1. Instalar Python 3.11.9
@@ -91,7 +143,7 @@ python scripts/download_redux.py  # Opcional
 python scripts/download_lrm.py   # Opcional
 ```
 
-### Setup Manual
+#### Setup Manual
 
 ```bash
 # 1. Criar ambiente virtual com Python 3.11.9
